@@ -35,7 +35,7 @@
 
 1. Клонируйте репозиторий:
    ```bash
-   git clone https://github.com/yourname/epd-analyzer.git
+   git clone https://github.com/TSergeymsk/epd-service.git
    cd epd-analyzer
    ```
 
