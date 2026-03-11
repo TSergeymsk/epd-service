@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Анализ ЕПД</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        /* Базовые стили */
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f7fa; }
+        .filters { display: flex; gap: 20px; flex-wrap: wrap; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); margin-bottom: 30px; }
+        .filter-item { display: flex; flex-direction: column; min-width: 150px; }
+        .filter-item label { font-weight: 600; margin-bottom: 5px; font-size: 0.9rem; color: #2c3e50; }
+        select, button { padding: 8px; border: 1px solid #d1d8e0; border-radius: 6px; font-size: 0.95rem; }
+        button { background: #3498db; color: white; border: none; cursor: pointer; font-weight: 600; padding: 10px 20px; align-self: flex-end; }
+        button:hover { background: #2980b9; }
+        button:disabled { background: #b0c4de; cursor: not-allowed; }
+        .main-row { display: flex; gap: 20px; margin-bottom: 30px; }
+        .charts-column { flex: 0 0 auto; display: flex; flex-direction: column; gap: 20px; }
+        .analysis-column { flex: 1; background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); overflow-y: auto; max-height: 600px; min-width: 300px; }
+        .analysis-column h3 { margin-top: 0; color: #2c3e50; }
+        .analysis-content { white-space: normal; font-size: 0.9rem; line-height: 1.5; }
+        .analysis-content pre { background: #f0f0f0; padding: 10px; border-radius: 8px; overflow-x: auto; }
+        .chart-container { width: 500px; height: 300px; background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); box-sizing: border-box; }
+        .small-chart-container { width: 400px; height: 250px; background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); box-sizing: border-box; }
+        .extra-row { display: flex; gap: 20px; margin-bottom: 30px; flex-wrap: wrap; }
+        
+        /* Десктопная таблица */
+        .desktop-table { width: 100%; border-collapse: collapse; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.05); font-size: 0.85rem; }
+        .desktop-table th, .desktop-table td { padding: 6px 8px; text-align: right; border-bottom: 1px solid #e9ecef; }
+        .desktop-table th { background: #f1f5f9; font-weight: 600; color: #2c3e50; cursor: pointer; font-size: 0.85rem; }
+        .desktop-table th:hover { background: #e2e8f0; }
+        .desktop-table .service-name { text-align: left; font-weight: 500; white-space: nowrap; }
+        .desktop-table tr:last-child td { border-bottom: none; }
+        .desktop-table .total-row { font-weight: 700; background: #f8fafc; }
+        
+        /* Мобильная таблица */
+        .mobile-table-container { display: none; margin-top: 20px; }
+        .mobile-table { width: 100%; border-collapse: collapse; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.05); font-size: 0.85rem; }
+        .mobile-table th, .mobile-table td { padding: 6px 8px; text-align: right; border-bottom: 1px solid #e9ecef; }
+        .mobile-table th { background: #f1f5f9; font-weight: 600; color: #2c3e50; font-size: 0.85rem; }
+        .mobile-table .service-name { text-align: left; font-weight: 500; white-space: nowrap; }
+        .mobile-table tr:last-child td { border-bottom: none; }
+        .mobile-table .total-row { font-weight: 700; background: #f8fafc; }
+        .selected-month { background-color: #fff3cd !important; }
+        .month-navigation { display: flex; justify-content: center; align-items: center; gap: 15px; margin: 10px 0; }
+        .month-navigation button { padding: 5px 15px; font-size: 1.2rem; }
+        
+        /* Адаптация для мобильных */
+        @media (max-width: 768px) {
+            .main-row { flex-direction: column; }
+            .charts-column { align-items: center; }
+            .chart-container { width: 100%; max-width: 500px; }
+            .small-chart-container { width: 100%; max-width: 400px; }
+            .analysis-column { max-height: none; }
+            .desktop-table { display: none; }
+            .mobile-table-container { display: block; }
+        }
+        
+        .no-data { text-align: center; padding: 20px; color: #7f8c8d; }
+        .multiselect { height: auto; min-height: 100px; }
+        .inline-buttons { display: flex; gap: 5px; margin-top: 5px; }
+        .hidden { display: none !important; }
+        .extra-charts-row { display: flex; gap: 20px; flex-wrap: wrap; }
+    </style>
+</head>
+<body>
+    <h1 style="text-align: center;">🏠 Анализ платежей ЖКХ</h1>
+
+    <div class="filters">
+        <div class="filter-item">
+            <label>Адрес:</label>
+            <select id="addressSelect" onchange="onAddressChange()">
+                <option value="">-- Выберите адрес --</option>
+            </select>
+        </div>
+        <div class="filter-item">
+            <label>Лицевые счета (мультивыбор):</label>
+            <select id="accountSelect" multiple class="multiselect" size="5"></select>
+            <div class="inline-buttons">
+                <button type="button" onclick="selectAllAccounts()">Выбрать все</button>
+                <button type="button" onclick="deselectAllAccounts()">Снять все</button>
+            </div>
+        </div>
+        <div class="filter-item">
+            <label>Начало периода:</label>
+            <select id="startPeriod"></select>
+        </div>
+        <div class="filter-item">
+            <label>Конец периода:</label>
+            <select id="endPeriod"></select>
+        </div>
+        <div class="filter-item">
+            <label>Услуги (мультивыбор):</label>
+            <select id="serviceSelect" multiple size="5"></select>
+            <div class="inline-buttons">
+                <button type="button" onclick="selectAllServices()">Выбрать все</button>
+                <button type="button" onclick="deselectAllServices()">Снять все</button>
+            </div>
+        </div>
+        <div class="filter-item">
+            <button id="updateBtn" onclick="refreshAll()">Обновить</button>
+        </div>
+    </div>
+
+    <div class="main-row">
+        <div class="charts-column">
+            <div class="chart-container">
+                <canvas id="totalChart"></canvas>
+            </div>
+            <div class="chart-container">
+                <canvas id="pieChart"></canvas>
+            </div>
+        </div>
+        <div class="analysis-column" id="analysisColumn">
+            <h3>📊 Анализ за <span id="selectedMonthLabel">последний месяц</span></h3>
+            <div id="analysisContent" class="analysis-content">
+                <p class="no-data">Загрузка анализа...</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="extra-row" id="extraRow">
+        <div id="extraCharts" class="extra-charts-row hidden">
+            <div class="small-chart-container">
+                <canvas id="quantityChart"></canvas>
+            </div>
+            <div class="small-chart-container">
+                <canvas id="tariffChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- Десктопная таблица -->
+    <div>
+        <h3>📋 Детализация по услугам (руб.)</h3>
+        <div id="tableContainer">
+            <table class="desktop-table" id="detailsTable">
+                <thead><tr></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Мобильная таблица с навигацией -->
+    <div class="mobile-table-container" id="mobileTableContainer">
+        <h3>📋 Детализация по услугам (руб.)</h3>
+        <div class="month-navigation">
+            <button id="prevMonthWindow" onclick="shiftWindow(-1)">←</button>
+            <span id="windowRange"></span>
+            <button id="nextMonthWindow" onclick="shiftWindow(1)">→</button>
+        </div>
+        <table class="mobile-table" id="mobileTable">
+            <thead><tr></tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <script>
+        let addresses = [];
+        let accounts = [];
+        let services = [];
+        let periods = [];
+        let totalChart, pieChart, quantityChart, tariffChart;
+        let currentAddress = null;
+        let currentData = null;
+        let currentMonthIndex = -1;
+        
+        // Для мобильной версии
+        let mobileWindowStart = 0; // индекс первого отображаемого месяца в окне
+        const MOBILE_WINDOW_SIZE = 5; // показываем 5 месяцев (текущий +2 слева +2 справа)
+
+        async function loadAddresses() {
+            try {
+                const response = await fetch('/api/addresses');
+                if (!response.ok) {
+                    console.error('Ошибка загрузки адресов:', response.statusText);
+                    return;
+                }
+                addresses = await response.json();
+                console.log('Получены адреса:', addresses);
+                const addressSel = document.getElementById('addressSelect');
+                addressSel.innerHTML = '<option value="">-- Выберите адрес --</option>';
+                if (addresses.length === 0) {
+                    const opt = document.createElement('option');
+                    opt.value = '';
+                    opt.text = 'Нет доступных адресов';
+                    opt.disabled = true;
+                    addressSel.appendChild(opt);
+                } else {
+                    addresses.forEach(addr => {
+                        const opt = document.createElement('option');
+                        opt.value = addr;
+                        opt.text = addr;
+                        addressSel.appendChild(opt);
+                    });
+                }
+            } catch (error) {
+                console.error('Ошибка при запросе адресов:', error);
+            }
+        }
+
+        async function loadAccountsForAddress(address) {
+            const response = await fetch(`/api/accounts_by_address?address=${encodeURIComponent(address)}`);
+            accounts = await response.json();
+            console.log('Счета для адреса', address, accounts);
+            const accountSel = document.getElementById('accountSelect');
+            accountSel.innerHTML = '';
+            accounts.forEach(acc => {
+                const opt = document.createElement('option');
+                opt.value = acc.id;
+                opt.text = acc.account_number;
+                accountSel.appendChild(opt);
+            });
+            selectAllAccounts();
+        }
+
+        function selectAllAccounts() {
+            const accountSel = document.getElementById('accountSelect');
+            for (let i = 0; i < accountSel.options.length; i++) {
+                accountSel.options[i].selected = true;
+            }
+        }
+
+        function deselectAllAccounts() {
+            const accountSel = document.getElementById('accountSelect');
+            for (let i = 0; i < accountSel.options.length; i++) {
+                accountSel.options[i].selected = false;
+            }
+        }
+
+        async function loadServices() {
+            const response = await fetch('/api/services');
+            services = await response.json();
+            console.log('Услуги:', services);
+            const serviceSel = document.getElementById('serviceSelect');
+            serviceSel.innerHTML = '';
+            services.forEach(s => {
+                const opt = document.createElement('option');
+                opt.value = s.id;
+                opt.text = s.name;
+                serviceSel.appendChild(opt);
+            });
+            selectAllServices();
+        }
+
+        function selectAllServices() {
+            const serviceSel = document.getElementById('serviceSelect');
+            for (let i = 0; i < serviceSel.options.length; i++) {
+                serviceSel.options[i].selected = true;
+            }
+            checkSingleService();
+        }
+
+        function deselectAllServices() {
+            const serviceSel = document.getElementById('serviceSelect');
+            for (let i = 0; i < serviceSel.options.length; i++) {
+                serviceSel.options[i].selected = false;
+            }
+            checkSingleService();
+        }
+
+        function checkSingleService() {
+            const serviceSel = document.getElementById('serviceSelect');
+            const selected = Array.from(serviceSel.selectedOptions).map(opt => opt.value);
+            const extraChartsDiv = document.getElementById('extraCharts');
+            if (selected.length === 1 && currentData) {
+                extraChartsDiv.classList.remove('hidden');
+                updateExtraCharts(currentData, selected[0]);
+            } else {
+                extraChartsDiv.classList.add('hidden');
+            }
+        }
+
+        async function loadPeriodsForAccounts(accountIds) {
+            if (!accountIds || accountIds.length === 0) {
+                periods = [];
+                populatePeriodSelects(false);
+                return;
+            }
+            const params = new URLSearchParams();
+            accountIds.forEach(id => params.append('account_ids', id));
+            const response = await fetch('/api/periods?' + params.toString());
+            periods = await response.json();
+            console.log('Периоды:', periods);
+            populatePeriodSelects(true);
+        }
+
+        function populatePeriodSelects(keepSelection) {
+            const startPeriod = document.getElementById('startPeriod');
+            const endPeriod = document.getElementById('endPeriod');
+            const oldStart = startPeriod.value;
+            const oldEnd = endPeriod.value;
+            const options = periods.map(p => `${p.year}-${String(p.month).padStart(2,'0')}`);
+            startPeriod.innerHTML = '';
+            endPeriod.innerHTML = '';
+            if (options.length === 0) {
+                const opt = document.createElement('option');
+                opt.value = '';
+                opt.text = 'Нет данных';
+                opt.disabled = true;
+                startPeriod.appendChild(opt.cloneNode(true));
+                endPeriod.appendChild(opt.cloneNode(true));
+                return;
+            }
+            options.forEach(val => {
+                startPeriod.appendChild(new Option(val, val));
+                endPeriod.appendChild(new Option(val, val));
+            });
+            if (keepSelection && oldStart && oldEnd) {
+                if (options.includes(oldStart)) {
+                    startPeriod.value = oldStart;
+                } else {
+                    setDefaultPeriodRange();
+                }
+                if (options.includes(oldEnd)) {
+                    endPeriod.value = oldEnd;
+                } else {
+                    setDefaultPeriodRange();
+                }
+            } else {
+                setDefaultPeriodRange();
+            }
+        }
+
+        function setDefaultPeriodRange() {
+            const startPeriod = document.getElementById('startPeriod');
+            const endPeriod = document.getElementById('endPeriod');
+            const options = Array.from(startPeriod.options).map(opt => opt.value).filter(v => v);
+            if (options.length === 0) return;
+            const newest = options.slice(0, Math.min(12, options.length));
+            const oldest = newest[newest.length-1];
+            const newestDate = newest[0];
+            startPeriod.value = oldest;
+            endPeriod.value = newestDate;
+        }
+
+        function getSelectedAccountIds() {
+            const accountSel = document.getElementById('accountSelect');
+            return Array.from(accountSel.selectedOptions).map(opt => parseInt(opt.value));
+        }
+
+        function getSelectedServiceIds() {
+            const serviceSel = document.getElementById('serviceSelect');
+            return Array.from(serviceSel.selectedOptions).map(opt => parseInt(opt.value));
+        }
+
+        async function fetchData() {
+            const accountIds = getSelectedAccountIds();
+            if (accountIds.length === 0) {
+                alert('Выберите хотя бы один лицевой счёт');
+                return;
+            }
+            const startPeriod = document.getElementById('startPeriod').value;
+            const endPeriod = document.getElementById('endPeriod').value;
+            if (!startPeriod || !endPeriod) {
+                alert('Выберите начальный и конечный период');
+                return;
+            }
+            const [startYear, startMonth] = startPeriod.split('-').map(Number);
+            const [endYear, endMonth] = endPeriod.split('-').map(Number);
+            const serviceIds = getSelectedServiceIds();
+
+            const params = new URLSearchParams();
+            accountIds.forEach(id => params.append('account_ids', id));
+            params.append('start_year', startYear);
+            params.append('start_month', startMonth);
+            params.append('end_year', endYear);
+            params.append('end_month', endMonth);
+            serviceIds.forEach(id => params.append('service_ids', id));
+
+            console.log('Запрос данных с параметрами:', params.toString());
+            const response = await fetch('/api/data?' + params.toString());
+            if (!response.ok) {
+                alert('Ошибка загрузки данных');
+                return;
+            }
+            const data = await response.json();
+            console.log('Получены данные:', data);
+            currentData = data;
+            currentMonthIndex = data.months.length > 0 ? data.months.length - 1 : -1;
+            
+            // Инициализируем окно мобильной таблицы, чтобы выбранный месяц был в центре
+            if (currentMonthIndex >= 0) {
+                const totalMonths = data.months.length;
+                mobileWindowStart = Math.max(0, Math.min(currentMonthIndex - 2, totalMonths - MOBILE_WINDOW_SIZE));
+            }
+            
+            updateCharts(data);
+            updateTable(data);
+            updateMobileTable(data);
+            checkSingleService();
+
+            if (currentMonthIndex >= 0) {
+                const selectedMonth = data.months[currentMonthIndex];
+                document.getElementById('selectedMonthLabel').textContent = selectedMonth;
+                const [year, month] = selectedMonth.split('-').map(Number);
+                const address = document.getElementById('addressSelect').value;
+                if (address) {
+                    loadAnalysisForMonth(address, year, month);
+                }
+            }
+        }
+
+        async function loadAnalysisForMonth(address, year, month) {
+            if (!address) return;
+            const params = new URLSearchParams();
+            params.append('address', address);
+            params.append('year', year);
+            params.append('month', month);
+            const response = await fetch('/api/analysis_for_month?' + params.toString());
+            const analysisDiv = document.getElementById('analysisContent');
+            if (response.ok) {
+                const data = await response.json();
+                const htmlContent = marked.parse(data.response);
+                analysisDiv.innerHTML = htmlContent + `<p><small>Модель: ${data.model}, ${new Date(data.created_at).toLocaleString()}</small></p>`;
+            } else {
+                analysisDiv.innerHTML = '<p class="no-data">Анализ за этот месяц не найден</p>';
+            }
+        }
+
+        function updateCharts(data) {
+            if (!data.months || data.months.length === 0) return;
+
+            const pointColors = data.months.map((_, idx) => 
+                idx === currentMonthIndex ? '#e74c3c' : '#27ae60'
+            );
+
+            const ctxTotal = document.getElementById('totalChart').getContext('2d');
+            if (totalChart) totalChart.destroy();
+            totalChart = new Chart(ctxTotal, {
+                type: 'line',
+                data: {
+                    labels: data.months,
+                    datasets: [{
+                        label: 'Итого к оплате (руб)',
+                        data: data.totals,
+                        borderColor: '#2ecc71',
+                        backgroundColor: 'rgba(46, 204, 113, 0.1)',
+                        tension: 0.2,
+                        fill: true,
+                        pointBackgroundColor: pointColors,
+                        pointRadius: 5,
+                        pointHoverRadius: 7
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    onClick: (event, elements) => {
+                        if (elements.length > 0) {
+                            const index = elements[0].index;
+                            setActiveMonth(index);
+                        }
+                    }
+                }
+            });
+
+            updatePieChartForMonth(currentMonthIndex);
+        }
+
+        function setActiveMonth(index) {
+            if (index === currentMonthIndex || !currentData) return;
+            currentMonthIndex = index;
+            const selectedMonth = currentData.months[index];
+            document.getElementById('selectedMonthLabel').textContent = selectedMonth;
+
+            totalChart.data.datasets[0].pointBackgroundColor = currentData.months.map((_, idx) => 
+                idx === currentMonthIndex ? '#e74c3c' : '#27ae60'
+            );
+            totalChart.update();
+
+            // При смене месяца двигаем окно мобильной таблицы, чтобы выбранный был в центре
+            const totalMonths = currentData.months.length;
+            mobileWindowStart = Math.max(0, Math.min(index - 2, totalMonths - MOBILE_WINDOW_SIZE));
+            
+            updatePieChartForMonth(index);
+            highlightTableColumn(index);
+            updateMobileTable(currentData); // обновляем мобильную таблицу
+
+            const [year, month] = selectedMonth.split('-').map(Number);
+            const address = document.getElementById('addressSelect').value;
+            if (address) {
+                loadAnalysisForMonth(address, year, month);
+            }
+        }
+
+        function shiftWindow(direction) {
+            // direction: -1 влево, 1 вправо
+            const totalMonths = currentData.months.length;
+            const newStart = mobileWindowStart + direction;
+            if (newStart >= 0 && newStart + MOBILE_WINDOW_SIZE <= totalMonths) {
+                mobileWindowStart = newStart;
+                updateMobileTable(currentData);
+            }
+        }
+
+        function updateMobileTable(data) {
+            if (!data || data.months.length === 0) return;
+            
+            const thead = document.querySelector('#mobileTable thead tr');
+            const tbody = document.querySelector('#mobileTable tbody');
+            thead.innerHTML = '';
+            tbody.innerHTML = '';
+
+            const nonZeroServices = data.service_names.filter(name => {
+                return data.services[name].amounts.some(val => Math.abs(val) > 0.001);
+            });
+
+            if (nonZeroServices.length === 0) {
+                thead.innerHTML = '<th colspan="2">Все услуги за выбранный период равны нулю</th>';
+                return;
+            }
+
+            // Определяем видимые месяцы
+            const visibleIndices = [];
+            for (let i = mobileWindowStart; i < mobileWindowStart + MOBILE_WINDOW_SIZE; i++) {
+                if (i < data.months.length) visibleIndices.push(i);
+            }
+            const visibleMonths = visibleIndices.map(i => data.months[i]);
+
+            // Заголовки
+            let headerHtml = '<th>Услуга</th>';
+            visibleIndices.forEach(idx => {
+                const month = data.months[idx];
+                headerHtml += `<th ${idx === currentMonthIndex ? 'class="selected-month"' : ''}>${month}</th>`;
+            });
+            thead.innerHTML = headerHtml;
+
+            // Строки услуг
+            nonZeroServices.forEach(name => {
+                let rowHtml = `<td class="service-name">${name}</td>`;
+                visibleIndices.forEach(idx => {
+                    const val = data.services[name].amounts[idx];
+                    rowHtml += `<td ${idx === currentMonthIndex ? 'class="selected-month"' : ''}>${val.toFixed(2)}</td>`;
+                });
+                const row = document.createElement('tr');
+                row.innerHTML = rowHtml;
+                tbody.appendChild(row);
+            });
+
+            // Итоговая строка
+            let totalRowHtml = '<td class="service-name">ИТОГО</td>';
+            visibleIndices.forEach(idx => {
+                const val = data.totals[idx];
+                totalRowHtml += `<td ${idx === currentMonthIndex ? 'class="selected-month"' : ''}>${val.toFixed(2)}</td>`;
+            });
+            const totalRow = document.createElement('tr');
+            totalRow.classList.add('total-row');
+            totalRow.innerHTML = totalRowHtml;
+            tbody.appendChild(totalRow);
+
+            // Обновляем текст диапазона
+            const rangeSpan = document.getElementById('windowRange');
+            if (visibleMonths.length > 0) {
+                rangeSpan.textContent = `${visibleMonths[0]} — ${visibleMonths[visibleMonths.length-1]}`;
+            } else {
+                rangeSpan.textContent = '';
+            }
+        }
+
+        function updatePieChartForMonth(monthIndex) {
+            if (!currentData || monthIndex < 0) return;
+            const month = currentData.months[monthIndex];
+            const monthData = {};
+            currentData.service_names.forEach(name => {
+                monthData[name] = currentData.services[name].amounts[monthIndex];
+            });
+            const total = Object.values(monthData).reduce((a,b) => a+b, 0);
+            const sortedEntries = Object.entries(monthData)
+                .filter(([_, val]) => val > 0)
+                .sort((a, b) => b[1] - a[1]);
+            const pieLabels = sortedEntries.map(e => e[0]);
+            const pieValues = sortedEntries.map(e => e[1]);
+            const piePercentages = pieValues.map(v => ((v/total)*100).toFixed(1));
+
+            const ctxPie = document.getElementById('pieChart').getContext('2d');
+            if (pieChart) pieChart.destroy();
+            pieChart = new Chart(ctxPie, {
+                type: 'pie',
+                data: {
+                    labels: pieLabels.map((l, i) => `${l} (${piePercentages[i]}%)`),
+                    datasets: [{
+                        data: pieValues,
+                        backgroundColor: ['#3498db','#e74c3c','#f1c40f','#2ecc71','#9b59b6','#e67e22','#1abc9c','#e84342']
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    const label = context.label.split(' (')[0];
+                                    const value = context.raw;
+                                    const percentage = ((value / total) * 100).toFixed(1);
+                                    let text = `${label}: ${value.toFixed(2)} руб. (${percentage}%)`;
+                                    const serviceName = label;
+                                    const quantity = currentData.services[serviceName]?.quantities[monthIndex] || 0;
+                                    const tariff = currentData.services[serviceName]?.tariffs[monthIndex] || 0;
+                                    if (quantity > 0) {
+                                        text += `\nПотребление: ${quantity.toFixed(3)}`;
+                                        text += `\nТариф: ${tariff.toFixed(2)} руб./ед.`;
+                                    }
+                                    return text;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateExtraCharts(data, serviceId) {
+            const serviceName = services.find(s => s.id == serviceId)?.name;
+            if (!serviceName) return;
+            const serviceData = data.services[serviceName];
+            if (!serviceData) return;
+
+            const ctxQ = document.getElementById('quantityChart').getContext('2d');
+            if (quantityChart) quantityChart.destroy();
+            quantityChart = new Chart(ctxQ, {
+                type: 'line',
+                data: {
+                    labels: data.months,
+                    datasets: [{
+                        label: `Потребление (${services.find(s => s.id == serviceId)?.unit || 'ед.'})`,
+                        data: serviceData.quantities,
+                        borderColor: '#f39c12',
+                        backgroundColor: 'rgba(243, 156, 18, 0.1)',
+                        tension: 0.2,
+                        fill: true
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false }
+            });
+
+            const ctxT = document.getElementById('tariffChart').getContext('2d');
+            if (tariffChart) tariffChart.destroy();
+            tariffChart = new Chart(ctxT, {
+                type: 'line',
+                data: {
+                    labels: data.months,
+                    datasets: [{
+                        label: 'Средний тариф (руб./ед.)',
+                        data: serviceData.tariffs,
+                        borderColor: '#e74c3c',
+                        backgroundColor: 'rgba(231, 76, 60, 0.1)',
+                        tension: 0.2,
+                        fill: true
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false }
+            });
+        }
+
+        function updateTable(data) {
+            // Десктопная таблица (все столбцы)
+            const thead = document.querySelector('#detailsTable thead tr');
+            const tbody = document.querySelector('#detailsTable tbody');
+            thead.innerHTML = '';
+            tbody.innerHTML = '';
+
+            if (!data.service_names || data.service_names.length === 0) {
+                thead.innerHTML = '<th colspan="2">Нет данных</th>';
+                return;
+            }
+
+            const nonZeroServices = data.service_names.filter(name => {
+                return data.services[name].amounts.some(val => Math.abs(val) > 0.001);
+            });
+
+            if (nonZeroServices.length === 0) {
+                thead.innerHTML = '<th colspan="2">Все услуги за выбранный период равны нулю</th>';
+                return;
+            }
+
+            let headerHtml = '<th>Услуга</th>';
+            data.months.forEach((m, idx) => {
+                headerHtml += `<th data-month-index="${idx}" ${idx === currentMonthIndex ? 'class="selected-month"' : ''}>${m}</th>`;
+            });
+            thead.innerHTML = headerHtml;
+
+            document.querySelectorAll('#detailsTable th[data-month-index]').forEach(th => {
+                th.addEventListener('click', function() {
+                    const index = parseInt(this.getAttribute('data-month-index'));
+                    setActiveMonth(index);
+                });
+            });
+
+            nonZeroServices.forEach(name => {
+                let rowHtml = `<td class="service-name">${name}</td>`;
+                data.services[name].amounts.forEach((val, idx) => {
+                    rowHtml += `<td${idx === currentMonthIndex ? ' class="selected-month"' : ''}>${val.toFixed(2)}</td>`;
+                });
+                const row = document.createElement('tr');
+                row.innerHTML = rowHtml;
+                tbody.appendChild(row);
+            });
+
+            let totalRowHtml = '<td class="service-name">ИТОГО</td>';
+            data.totals.forEach((val, idx) => {
+                totalRowHtml += `<td${idx === currentMonthIndex ? ' class="selected-month"' : ''}>${val.toFixed(2)}</td>`;
+            });
+            const totalRow = document.createElement('tr');
+            totalRow.classList.add('total-row');
+            totalRow.innerHTML = totalRowHtml;
+            tbody.appendChild(totalRow);
+        }
+
+        function highlightTableColumn(monthIndex) {
+            if (currentData) updateTable(currentData);
+        }
+
+        async function onAddressChange() {
+            const address = document.getElementById('addressSelect').value;
+            if (!address) {
+                document.getElementById('accountSelect').innerHTML = '';
+                return;
+            }
+            currentAddress = address;
+            await loadAccountsForAddress(address);
+            const accountIds = getSelectedAccountIds();
+            await loadPeriodsForAccounts(accountIds);
+            populatePeriodSelects(false);
+            await fetchData();
+        }
+
+        async function refreshAll() {
+            const accountIds = getSelectedAccountIds();
+            if (accountIds.length === 0) {
+                alert('Выберите хотя бы один лицевой счёт');
+                return;
+            }
+            await loadPeriodsForAccounts(accountIds);
+            await fetchData();
+        }
+
+        window.onload = async function() {
+            await loadAddresses();
+            await loadServices();
+            if (addresses.length > 0) {
+                document.getElementById('addressSelect').value = addresses[0];
+                await onAddressChange();
+            }
+        };
+    </script>
+</body>
+</html>
