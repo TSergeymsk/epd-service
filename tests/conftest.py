@@ -1,21 +1,17 @@
 import sys
 import os
-# Добавляем корневую папку проекта в путь поиска модулей
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 import tempfile
 import sqlite3
-
-# Теперь модули приложения доступны для импорта
 import frontend
 
 @pytest.fixture(scope='function')
 def temp_db():
-    """Создаёт временную БД и возвращает её путь."""
     db_fd, db_path = tempfile.mkstemp(suffix='.db')
+    # Инициализация схемы (можно вызвать init_database, но чтобы не зависеть, создаём сами)
     conn = sqlite3.connect(db_path)
-    # Создаём схему (скопируйте из init_db.py или свою)
     conn.executescript('''
         CREATE TABLE IF NOT EXISTS accounts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,8 +39,6 @@ def temp_db():
 
 @pytest.fixture
 def app(temp_db):
-    """Подменяет путь к БД и возвращает экземпляр Flask-приложения."""
-    # Предполагаем, что в frontend.py есть глобальная переменная DB_PATH
     frontend.DB_PATH = temp_db
     frontend.app.config['TESTING'] = True
     frontend.app.config['DATABASE'] = temp_db
@@ -52,10 +46,9 @@ def app(temp_db):
 
 @pytest.fixture
 def client(app):
-    """Возвращает тестовый клиент."""
     return app.test_client()
 
-# Моки для внешних API (можно использовать в тестах)
+# Моки для внешних API (если нужны)
 @pytest.fixture
 def mock_ai_response():
     from unittest.mock import patch, MagicMock
