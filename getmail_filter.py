@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Фильтр для getmail, который проверяет входящие письма по заданным шаблонам,
+""" Фильтр для getmail, который проверяет входящие письма по заданным шаблонам,
 сохраняет подходящие письма во временный каталог и запускает email_parser.py.
 Письмо передаётся на stdin и должно быть выведено в stdout без изменений.
 """
@@ -47,9 +46,9 @@ def main():
     script_dir = Path(__file__).parent.absolute()
     config_path = get_config_path()
     config = load_config(config_path)
-
     log_dir = config.get('logging', 'log_dir')
     logger = setup_logging(log_dir)
+
     logger.info("Получено письмо, начинаем обработку фильтром")
 
     msg = email.message_from_bytes(raw_email, policy=default)
@@ -79,8 +78,8 @@ def main():
 
     if from_match and to_match and subject_match:
         logger.info("Письмо соответствует критериям, начинаем обработку")
-        os.makedirs(temp_dir, exist_ok=True)
 
+        os.makedirs(temp_dir, exist_ok=True)
         timestamp = int(time.time())
         content_hash = hashlib.md5(raw_email).hexdigest()[:8]
         filename = f"email_{timestamp}_{content_hash}.eml"

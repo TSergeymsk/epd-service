@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""
-Парсер email-писем, содержащих данные ЕПД.
-Сначала пытается извлечь данные из HTML-таблицы (если есть),
-иначе использует текстовый парсер.
-После успешного сохранения запускает анализ ИИ и отправляет результат в Telegram.
+""" Парсер email-писем, содержащих данные ЕПД. Сначала пытается извлечь данные из
+HTML-таблицы (если есть), иначе использует текстовый парсер. После успешного
+сохранения запускает анализ ИИ и отправляет результат в Telegram.
 Использование: python3 email_parser.py <путь_к_файлу_письма>
 """
 import os
@@ -74,6 +72,7 @@ def normalize_service_name(raw_name):
         return 'Запирающее устройство'
     if 'шлагбаум' in clean_name:
         return 'Шлагбаум'
+
     logger.debug(f"Не удалось нормализовать название услуги: {raw_name}")
     return raw_name.strip()
 
@@ -168,7 +167,8 @@ def parse_html_email(html_content):
     # Доп. информация о квартире
     info_match = re.search(
         r'Тип кв\.:\s*(.+?)[,.]?\s+К-во комнат:\s*(\d+)\s+Площадь общая:\s*([\d\.]+),?\s+жилая:\s*([\d\.]+)',
-        full_text, re.IGNORECASE
+        full_text,
+        re.IGNORECASE
     )
     if info_match:
         data['period_info']['type'] = info_match.group(1).strip()
@@ -187,6 +187,7 @@ def parse_html_email(html_content):
     # ---- Поиск таблицы с услугами ----
     tables = soup.find_all('table')
     services_found = False
+
     service_keywords = ['ХВС', 'ГВС', 'Водоотв', 'Отоп', 'Сод.жил', 'кап. ремонт', 'ТКО', 'Запирающее', 'шлагбаумов']
 
     def is_service_row(cells):
@@ -223,9 +224,11 @@ def parse_html_email(html_content):
             cells = row.find_all(['td', 'th'])
             if not is_service_row(cells):
                 continue
+
             service_name_raw = cells[0].get_text(strip=True)
             second_text = cells[1].get_text(strip=True)
             third_text = cells[2].get_text(strip=True)
+
             quantity_match = re.search(r'([\d\.,]+)', second_text)
             if not quantity_match:
                 continue
@@ -234,6 +237,7 @@ def parse_html_email(html_content):
                 quantity = float(quantity_str)
             except ValueError:
                 continue
+
             amount_match = re.search(r'([\d\.,]+)', third_text)
             if not amount_match:
                 continue
@@ -256,7 +260,6 @@ def parse_html_email(html_content):
             services_found = True
             logger.debug(f"Найдена услуга в таблице: {service_data}")
 
-    if services_found:
         logger.info(f"Найдено услуг в HTML-таблице: {len(data['services'])}")
         return data
     else:
@@ -312,7 +315,8 @@ def parse_text_epd(text):
     # Доп. информация
     info_match = re.search(
         r'Тип кв\.:\s*(.+?)[,.]?\s+К-во комнат:\s*(\d+)\s+Площадь общая:\s*([\d\.]+),?\s+жилая:\s*([\d\.]+)',
-        text, re.IGNORECASE
+        text,
+        re.IGNORECASE
     )
     if info_match:
         data['period_info']['type'] = info_match.group(1).strip()
@@ -334,6 +338,7 @@ def parse_text_epd(text):
         line = line.strip()
         if not line:
             continue
+
         keywords = [
             ('ХВС', 'ХВС КПУ'),
             ('ГВС', 'ГВС КПУ'),
@@ -345,6 +350,7 @@ def parse_text_epd(text):
             ('Запирающее', 'Запирающее устройство'),
             ('шлагбаумов', 'Шлагбаум')
         ]
+
         found_keyword = None
         service_name = None
         for kw, name in keywords:
@@ -461,10 +467,12 @@ def save_to_db(conn, data, source_identifier):
     for svc in data['services']:
         normalized_name = normalize_service_name(svc['name'])
         service_id = get_or_create_service(conn, normalized_name, svc.get('unit'))
+
         cursor = conn.cursor()
         cursor.execute("""
             INSERT OR REPLACE INTO charges
-            (account_id, period_id, service_id, quantity, tariff, accrued_by_tariff, benefit, recalculation, amount_due)
+            (account_id, period_id, service_id, quantity, tariff, accrued_by_tariff,
+             benefit, recalculation, amount_due)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             account_id,
@@ -491,6 +499,7 @@ def save_to_db(conn, data, source_identifier):
 # ---- Функция отправки сообщения в Telegram ----
 def send_telegram_message(bot_token, chat_id, message_html):
     import requests
+
     MAX_LEN = 4000
     if len(message_html) > MAX_LEN:
         logger.warning(f"Сообщение слишком длинное ({len(message_html)} символов), обрезаем до {MAX_LEN}")
@@ -502,6 +511,7 @@ def send_telegram_message(bot_token, chat_id, message_html):
         'text': message_html,
         'parse_mode': 'HTML'
     }
+
     try:
         response = requests.post(url, json=payload, timeout=10)
         if response.status_code == 400:
@@ -517,19 +527,15 @@ def send_telegram_message(bot_token, chat_id, message_html):
         logger.error(f"Ошибка отправки в Telegram: {e}")
 
 def convert_markdown_to_telegram_html(text):
-    """
-    Преобразует простую markdown-разметку в HTML, допустимый в Telegram.
-    """
+    """Преобразует простую markdown-разметку в HTML, допустимый в Telegram."""
     text = html.escape(text)
 
     # Заголовки ### -> жирный текст
-    text = re.sub(r'^### (.*?)$', r'<b>\1</b>', text, flags=re.MULTILINE)
-
+    text = re.sub(r'^### (.*?)$', r'\1', text, flags=re.MULTILINE)
     # Жирный текст **
-    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
-
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
     # Курсив *
-    text = re.sub(r'(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)', r'<i>\1</i>', text)
+    text = re.sub(r'(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)', r'\1', text)
 
     # Маркированные списки: строки, начинающиеся с * или -
     lines = text.split('\n')
@@ -548,29 +554,29 @@ def convert_markdown_to_telegram_html(text):
 
 def format_telegram_message(address, account_number, year, month, aggregated_data, ai_response):
     lines = []
-    lines.append("<b>Анализ ЕПД</b>")
-    lines.append(f"🏠 <b>Адрес:</b> {html.escape(address)}")
-    lines.append(f"🆔 <b>Лицевой счет:</b> {html.escape(account_number)}")
-    lines.append(f"📅 <b>Период:</b> {year}-{month:02d}")
+    lines.append("Анализ ЕПД")
+    lines.append(f" Адрес: {html.escape(address)}")
+    lines.append(f" Лицевой счет: {html.escape(account_number)}")
+    lines.append(f" Период: {year}-{month:02d}")
     lines.append("")
 
     if aggregated_data:
         total = sum(item['amount_due'] for item in aggregated_data)
-        lines.append(f"💰 <b>Итого: {total:,.2f} руб.</b>, в т.ч.:")
+        lines.append(f" Итого: {total:,.2f} руб., в т.ч.:")
         sorted_data = sorted(aggregated_data, key=lambda x: x['amount_due'], reverse=True)
         for item in sorted_data:
             quantity_str = f"{item['quantity']:.3f} {item.get('unit', 'ед.')}".replace('.', ',')
-            lines.append(f"🔹 <b>{html.escape(item['name'])}:</b> {item['amount_due']:,.2f} руб. <i>{quantity_str}</i>")
+            lines.append(f" {html.escape(item['name'])}: {item['amount_due']:,.2f} руб. {quantity_str}")
     else:
-        lines.append("💰 <b>Итого: данные не найдены</b>")
-    lines.append("")
+        lines.append(" Итого: данные не найдены")
 
-    lines.append("<b>Анализ:</b>")
+    lines.append("")
+    lines.append("Анализ:")
     if ai_response:
         formatted_response = convert_markdown_to_telegram_html(ai_response)
         lines.append(formatted_response)
     else:
-        lines.append("<i>Анализ не проведен (ошибка сервиса ИИ)</i>")
+        lines.append("Анализ не проведен (ошибка сервиса ИИ)")
 
     return "\n".join(lines)
 
@@ -608,21 +614,27 @@ def main():
 
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON;")
-
     success = save_to_db(conn, data, os.path.basename(email_path))
     conn.close()
 
     if success:
         logger.info(f"Письмо {email_path} успешно обработано.")
+
         conn2 = sqlite3.connect(db_path)
         conn2.row_factory = sqlite3.Row
+
         try:
             account_ids = get_accounts_for_address(conn2, data['address'])
             logger.info(f"Найдены account_ids: {account_ids}")
+
             if account_ids:
                 cur = conn2.cursor()
-                cur.execute("SELECT id FROM periods WHERE year = ? AND month = ?", (data['year'], data['month']))
+                cur.execute(
+                    "SELECT id FROM periods WHERE year = ? AND month = ?",
+                    (data['year'], data['month'])
+                )
                 period_row = cur.fetchone()
+
                 if period_row:
                     period_id = period_row['id']
                     placeholders = ','.join('?' * len(account_ids))
@@ -637,6 +649,7 @@ def main():
                     params = account_ids + [period_id]
                     cur.execute(query, params)
                     rows = cur.fetchall()
+
                     agg_data = []
                     for row in rows:
                         agg_data.append({
@@ -655,6 +668,7 @@ def main():
         except Exception as e:
             logger.exception(f"Ошибка получения агрегированных данных: {e}")
             agg_data = []
+
         conn2.close()
 
         ai_response_text = None
@@ -676,6 +690,7 @@ def main():
             aggregated_data=agg_data,
             ai_response=ai_response_text
         )
+
         send_telegram_message(
             config.get('telegram', 'bot_token'),
             config.get('telegram', 'chat_id'),
