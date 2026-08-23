@@ -11,7 +11,7 @@ import frontend
 @pytest.fixture(scope='function')
 def temp_db():
     db_fd, db_path = tempfile.mkstemp(suffix='.db')
-    init_database(db_path)  # используем реальную функцию инициализации
+    init_database(db_path)
     yield db_path
     os.close(db_fd)
     os.unlink(db_path)
