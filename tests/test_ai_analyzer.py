@@ -35,6 +35,8 @@ def create_test_schema(conn):
 
 def test_get_aggregated_month_data(temp_db):
     conn = sqlite3.connect(temp_db)
+    # Ключевое исправление: доступ к колонкам по имени
+    conn.row_factory = sqlite3.Row
     create_test_schema(conn)
     cur = conn.cursor()
     
@@ -54,7 +56,7 @@ def test_get_aggregated_month_data(temp_db):
     # Создаём аккаунт
     cur.execute("INSERT INTO accounts (address, account_number) VALUES (?,?)",
                 ("addr1", "acc1"))
-    account_id = cur.lastrowid  # это ID аккаунта
+    account_id = cur.lastrowid
     
     # Добавляем начисления
     cur.execute("INSERT INTO charges (account_id, service_id, period_id, amount_due, quantity) VALUES (?,?,?,?,?)",
@@ -63,11 +65,11 @@ def test_get_aggregated_month_data(temp_db):
                 (account_id, service_id_gvs, period_id, 200.0, 1))
     conn.commit()
     
-    # Вызываем функцию с ID аккаунта (а не номером счета)
+    # Вызов тестируемой функции
     data = get_aggregated_month_data(conn, [account_id], 2025, 1)
     conn.close()
     
-    # Проверяем структуру результата
+    # Проверки
     assert "addr1" in data
     assert data["addr1"]["total"] == 350.0
     assert data["addr1"]["services"]["ХВС"] == 150.0
@@ -75,6 +77,8 @@ def test_get_aggregated_month_data(temp_db):
 
 def test_analyze_address_month(temp_db):
     conn = sqlite3.connect(temp_db)
+    # Устанавливаем row_factory для согласованности
+    conn.row_factory = sqlite3.Row
     create_test_schema(conn)
     cur = conn.cursor()
     
@@ -100,10 +104,12 @@ def test_analyze_address_month(temp_db):
     conn.commit()
     conn.close()
     
-    # Создаём корректный объект конфига (как в реальном приложении)
+    # Создаём полноценный конфиг с необходимыми секциями
     config = configparser.ConfigParser()
     config['paths'] = {'db_path': temp_db}
+    config['openrouter'] = {'api_key': 'test_key'}
+    config['ai'] = {'model': 'test_model'}  # если используется в коде
     
-    # Вызов функции с правильными аргументами
+    # Вызов функции
     result = analyze_address_month("addr1", 2025, 1, config, conn=None)
     assert result is not None
