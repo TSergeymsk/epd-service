@@ -8,6 +8,8 @@ def create_test_schema(conn):
         DROP TABLE IF EXISTS charges;
         DROP TABLE IF EXISTS services;
         DROP TABLE IF EXISTS periods;
+        DROP TABLE IF EXISTS address_analysis;
+        
         CREATE TABLE services (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT UNIQUE
@@ -27,6 +29,16 @@ def create_test_schema(conn):
             quantity REAL,
             FOREIGN KEY(account_id) REFERENCES accounts(id),
             FOREIGN KEY(service_id) REFERENCES services(id),
+            FOREIGN KEY(period_id) REFERENCES periods(id)
+        );
+        CREATE TABLE address_analysis (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            address TEXT,
+            period_id INTEGER,
+            prompt TEXT,
+            response TEXT,
+            model TEXT,
+            tokens_used INTEGER,
             FOREIGN KEY(period_id) REFERENCES periods(id)
         );
     ''')
