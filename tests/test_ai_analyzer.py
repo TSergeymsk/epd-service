@@ -63,7 +63,6 @@ def test_get_aggregated_month_data(temp_db):
     data = get_aggregated_month_data(conn, [account_id], 2025, 1)
     conn.close()
     
-    # Проверяем, что возвращается список словарей с услугами
     assert isinstance(data, list)
     names = [item['name'] for item in data]
     assert 'ХВС' in names
@@ -107,7 +106,8 @@ def test_analyze_address_month(temp_db):
     config['paths'] = {'db_path': temp_db}
     config['openrouter'] = {
         'api_key': 'test_key',
-        'model': 'test_model'   # <-- добавлено
+        'model': 'test_model',
+        'url': 'https://api.openrouter.ai/v1/chat/completions'  # добавлено
     }
     config['ai'] = {'model': 'test_model'}
     
