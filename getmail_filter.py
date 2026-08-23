@@ -1,51 +1,122 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-import sys
+"""
+Фильтр для getmail, который проверяет входящие письма по заданным шаблонам,
+сохраняет подходящие письма во временный каталог и запускает email_parser.py.
+Письмо передаётся на stdin и должно быть выведено в stdout без изменений.
+"""
 import os
-import subprocess
-import re
-import tempfile
+import sys
+import email
+from email.policy import default
+import logging
 import configparser
+import subprocess
+import time
+import hashlib
+from pathlib import Path
 
-config = configparser.ConfigParser()
-config.read('config.ini')
+def get_config_path():
+    env_path = os.environ.get('EPD_CONFIG')
+    if env_path:
+        return env_path
+    return str(Path(__file__).parent / 'config.ini')
 
-def should_process_email(from_header):
-    """
-    Проверяет, нужно ли обрабатывать письмо по полю From.
-    """
-    # Пример: разрешаем только письма с uslugi@mos.ru
-    pattern = r'uslugi@mos\.ru$'
-    return bool(re.search(pattern, from_header))
+def load_config(config_path):
+    config = configparser.ConfigParser()
+    config.read(config_path)
+    return config
 
-# Основная логика фильтра
-if __name__ == "__main__":
-    # Получаем письмо из stdin (как это делает getmail)
-    email_content = sys.stdin.read()
-    if not email_content:
+def setup_logging(log_dir):
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, 'getmail_filter.log')
+    # Только файловый лог, без stderr, чтобы не раздражать getmail
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file)
+        ]
+    )
+    return logging.getLogger(__name__)
+
+def main():
+    raw_email = sys.stdin.buffer.read()
+    if not raw_email:
         sys.exit(0)
-    
-    # Парсим заголовок From (упрощённо)
-    from_line = re.search(r'^From:\s*(.+?)$', email_content, re.MULTILINE)
-    if not from_line:
+
+    script_dir = Path(__file__).parent.absolute()
+    config_path = get_config_path()
+    config = load_config(config_path)
+
+    log_dir = config.get('logging', 'log_dir')
+    logger = setup_logging(log_dir)
+    logger.info("Получено письмо, начинаем обработку фильтром")
+
+    msg = email.message_from_bytes(raw_email, policy=default)
+    from_header = msg.get('From', '')
+    to_header = msg.get('To', '')
+    subject_header = msg.get('Subject', '')
+
+    logger.debug(f"From: {from_header}")
+    logger.debug(f"To: {to_header}")
+    logger.debug(f"Subject: {subject_header}")
+
+    try:
+        from_pattern = config.get('getmail_filter', 'from_pattern')
+        to_pattern = config.get('getmail_filter', 'to_pattern')
+        subject_pattern = config.get('getmail_filter', 'subject_pattern')
+        temp_dir = config.get('paths', 'email_temp_dir')
+    except (configparser.NoSectionError, configparser.NoOptionError) as e:
+        logger.error(f"Ошибка чтения конфигурации фильтра: {e}")
+        sys.stdout.buffer.write(raw_email)
         sys.exit(0)
-    from_header = from_line.group(1).strip()
-    
-    if should_process_email(from_header):
-        # Сохраняем письмо во временный файл и вызываем парсер
-        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.eml') as f:
-            f.write(email_content)
-            tmp_path = f.name
-        
+
+    from_match = from_pattern in from_header
+    to_match = to_pattern in to_header
+    subject_match = subject_pattern in subject_header
+
+    logger.info(f"from_match={from_match}, to_match={to_match}, subject_match={subject_match}")
+
+    if from_match and to_match and subject_match:
+        logger.info("Письмо соответствует критериям, начинаем обработку")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        timestamp = int(time.time())
+        content_hash = hashlib.md5(raw_email).hexdigest()[:8]
+        filename = f"email_{timestamp}_{content_hash}.eml"
+        filepath = os.path.join(temp_dir, filename)
+
         try:
-            subprocess.run(['python3', 'email_parser.py', tmp_path], timeout=180, check=True)
+            with open(filepath, 'wb') as f:
+                f.write(raw_email)
+            logger.info(f"Письмо сохранено во временный файл: {filepath}")
         except Exception as e:
-            print(f"Ошибка обработки: {e}", file=sys.stderr)
-        finally:
-            # Удаляем временный файл, если нужно (можно оставить для отладки)
-            # os.unlink(tmp_path)
-            pass
+            logger.error(f"Не удалось сохранить письмо: {e}")
+            sys.stdout.buffer.write(raw_email)
+            sys.exit(0)
+
+        parser_script = script_dir / 'email_parser.py'
+        try:
+            result = subprocess.run(
+                [sys.executable, str(parser_script), filepath],
+                capture_output=True,
+                text=True,
+                timeout=180
+            )
+            if result.returncode == 0:
+                logger.info(f"Парсер успешно обработал {filepath}, удаляем временный файл")
+                os.remove(filepath)
+            else:
+                logger.error(f"Парсер завершился с ошибкой (код {result.returncode}): {result.stderr}")
+                # Оставляем файл для отладки
+        except subprocess.TimeoutExpired:
+            logger.error(f"Парсер превысил время ожидания (180 сек) для {filepath}")
+        except Exception as e:
+            logger.exception(f"Ошибка при запуске парсера: {e}")
     else:
-        # Письмо не обрабатываем
-        sys.exit(0)
+        logger.info("Письмо не соответствует критериям фильтрации")
+
+    sys.stdout.buffer.write(raw_email)
+
+if __name__ == '__main__':
+    main()
