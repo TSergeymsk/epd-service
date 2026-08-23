@@ -117,5 +117,20 @@ def main():
 
     sys.stdout.buffer.write(raw_email)
 
+# ===== Функции-обёртки для тестов =====
+
+def should_process_email(from_header):
+    """
+    Проверяет, нужно ли обрабатывать письмо по полю From.
+    Использует логику из конфига или значение по умолчанию.
+    """
+    try:
+        config = load_config(get_config_path())
+        from_pattern = config.get('getmail_filter', 'from_pattern')
+        return from_pattern in from_header
+    except (configparser.NoSectionError, configparser.NoOptionError, Exception):
+        # Если нет конфига, используем значение по умолчанию
+        return 'uslugi@mos.ru' in from_header
+
 if __name__ == '__main__':
     main()

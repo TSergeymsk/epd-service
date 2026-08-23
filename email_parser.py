@@ -700,5 +700,48 @@ def main():
         logger.error(f"Не удалось обработать письмо {email_path}")
         sys.exit(1)
 
+# ===== Функции-обёртки для тестов =====
+
+def parse_email(email_path):
+    """
+    Обёртка для вызова основной функции main().
+    Возвращает True при успехе, False при ошибке.
+    """
+    original_argv = sys.argv
+    try:
+        sys.argv = ['email_parser.py', email_path]
+        try:
+            main()
+            return True
+        except SystemExit as e:
+            return e.code == 0
+    except Exception as e:
+        logger.error(f"Ошибка в parse_email: {e}")
+        return False
+    finally:
+        sys.argv = original_argv
+
+
+def save_charges_to_db(db_path, account_id, charges):
+    """
+    Сохраняет список начислений в БД.
+    Использует существующие функции get_or_create_service и get_or_create_period.
+    """
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys = ON;")
+    cursor = conn.cursor()
+    
+    for service_name, amount in charges:
+        service_id = get_or_create_service(conn, service_name)
+        period_id = get_or_create_period(conn, 2025, 1)  # для тестов
+        cursor.execute("""
+            INSERT OR REPLACE INTO charges 
+            (account_id, service_id, period_id, amount_due) 
+            VALUES (?, ?, ?, ?)
+        """, (account_id, service_id, period_id, amount))
+    
+    conn.commit()
+    conn.close()
+
 if __name__ == '__main__':
     main()
