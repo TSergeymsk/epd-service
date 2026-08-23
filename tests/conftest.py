@@ -1,19 +1,21 @@
+import sys
+import os
+# Добавляем корневую папку проекта в путь поиска модулей
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import pytest
 import tempfile
-import os
 import sqlite3
 
-# Импортируем приложение после того, как определим фикстуры? 
-# Лучше импортировать внутри фикстур, чтобы избежать глобального состояния.
-# Однако для удобства импортируем здесь, но путь к БД будем менять в фикстуре.
+# Теперь модули приложения доступны для импорта
 import frontend
 
 @pytest.fixture(scope='function')
 def temp_db():
     """Создаёт временную БД и возвращает её путь."""
     db_fd, db_path = tempfile.mkstemp(suffix='.db')
-    # Инициализация схемы (скопируйте из init_db.py или вынесите в отдельную функцию)
     conn = sqlite3.connect(db_path)
+    # Создаём схему (скопируйте из init_db.py или свою)
     conn.executescript('''
         CREATE TABLE IF NOT EXISTS accounts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,7 +34,6 @@ def temp_db():
         );
         CREATE INDEX IF NOT EXISTS idx_accounts_address ON accounts(address);
         CREATE INDEX IF NOT EXISTS idx_accounts_month_year ON accounts(month, year);
-        -- добавьте другие таблицы, если есть
     ''')
     conn.commit()
     conn.close()
@@ -42,20 +43,19 @@ def temp_db():
 
 @pytest.fixture
 def app(temp_db):
-    """Создаёт экземпляр приложения с тестовой конфигурацией."""
-    # Подменяем глобальную переменную DB_PATH (если она используется)
+    """Подменяет путь к БД и возвращает экземпляр Flask-приложения."""
+    # Предполагаем, что в frontend.py есть глобальная переменная DB_PATH
     frontend.DB_PATH = temp_db
-    # Если используется config, также задаём:
     frontend.app.config['TESTING'] = True
     frontend.app.config['DATABASE'] = temp_db
     return frontend.app
 
 @pytest.fixture
 def client(app):
-    """Возвращает тестовый клиент Flask."""
+    """Возвращает тестовый клиент."""
     return app.test_client()
 
-# Фикстуры для моков API
+# Моки для внешних API (можно использовать в тестах)
 @pytest.fixture
 def mock_ai_response():
     from unittest.mock import patch, MagicMock
