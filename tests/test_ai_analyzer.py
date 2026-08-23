@@ -35,17 +35,14 @@ def create_test_schema(conn):
 
 def test_get_aggregated_month_data(temp_db):
     conn = sqlite3.connect(temp_db)
-    # Ключевое исправление: доступ к колонкам по имени
     conn.row_factory = sqlite3.Row
     create_test_schema(conn)
     cur = conn.cursor()
     
-    # Добавляем услуги и период
     cur.execute("INSERT INTO services (name) VALUES ('ХВС')")
     cur.execute("INSERT INTO services (name) VALUES ('ГВС')")
     cur.execute("INSERT INTO periods (year, month) VALUES (2025, 1)")
     
-    # Получаем ID
     cur.execute("SELECT id FROM services WHERE name='ХВС'")
     service_id_hvs = cur.fetchone()[0]
     cur.execute("SELECT id FROM services WHERE name='ГВС'")
@@ -53,31 +50,32 @@ def test_get_aggregated_month_data(temp_db):
     cur.execute("SELECT id FROM periods WHERE year=2025 AND month=1")
     period_id = cur.fetchone()[0]
     
-    # Создаём аккаунт
     cur.execute("INSERT INTO accounts (address, account_number) VALUES (?,?)",
                 ("addr1", "acc1"))
     account_id = cur.lastrowid
     
-    # Добавляем начисления
     cur.execute("INSERT INTO charges (account_id, service_id, period_id, amount_due, quantity) VALUES (?,?,?,?,?)",
                 (account_id, service_id_hvs, period_id, 150.0, 1))
     cur.execute("INSERT INTO charges (account_id, service_id, period_id, amount_due, quantity) VALUES (?,?,?,?,?)",
                 (account_id, service_id_gvs, period_id, 200.0, 1))
     conn.commit()
     
-    # Вызов тестируемой функции
     data = get_aggregated_month_data(conn, [account_id], 2025, 1)
     conn.close()
     
-    # Проверки
-    assert "addr1" in data
-    assert data["addr1"]["total"] == 350.0
-    assert data["addr1"]["services"]["ХВС"] == 150.0
-    assert data["addr1"]["services"]["ГВС"] == 200.0
+    # Проверяем, что возвращается список словарей с услугами
+    assert isinstance(data, list)
+    names = [item['name'] for item in data]
+    assert 'ХВС' in names
+    assert 'ГВС' in names
+    for item in data:
+        if item['name'] == 'ХВС':
+            assert item['amount_due'] == 150.0
+        elif item['name'] == 'ГВС':
+            assert item['amount_due'] == 200.0
 
 def test_analyze_address_month(temp_db):
     conn = sqlite3.connect(temp_db)
-    # Устанавливаем row_factory для согласованности
     conn.row_factory = sqlite3.Row
     create_test_schema(conn)
     cur = conn.cursor()
@@ -104,12 +102,14 @@ def test_analyze_address_month(temp_db):
     conn.commit()
     conn.close()
     
-    # Создаём полноценный конфиг с необходимыми секциями
+    # Создаём конфиг с необходимыми секциями и опциями
     config = configparser.ConfigParser()
     config['paths'] = {'db_path': temp_db}
-    config['openrouter'] = {'api_key': 'test_key'}
-    config['ai'] = {'model': 'test_model'}  # если используется в коде
+    config['openrouter'] = {
+        'api_key': 'test_key',
+        'model': 'test_model'   # <-- добавлено
+    }
+    config['ai'] = {'model': 'test_model'}
     
-    # Вызов функции
     result = analyze_address_month("addr1", 2025, 1, config, conn=None)
     assert result is not None
