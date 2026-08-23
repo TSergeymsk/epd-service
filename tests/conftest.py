@@ -2,20 +2,17 @@ import pytest
 import tempfile
 import os
 import sqlite3
-from unittest.mock import patch, MagicMock
-from flask import Flask
 
-# Импортируем модули приложения (предполагаем, что они доступны)
-from email_parser import parse_email, save_charges_to_db
-from ai_analyzer import analyze_address_month
-from frontend import app as flask_app
-from telegram_notifier import send_telegram_message
+# Импортируем приложение после того, как определим фикстуры? 
+# Лучше импортировать внутри фикстур, чтобы избежать глобального состояния.
+# Однако для удобства импортируем здесь, но путь к БД будем менять в фикстуре.
+import frontend
 
-# Фикстура временной БД
-@pytest.fixture
+@pytest.fixture(scope='function')
 def temp_db():
+    """Создаёт временную БД и возвращает её путь."""
     db_fd, db_path = tempfile.mkstemp(suffix='.db')
-    # Создаём схему (скопируйте из init_db.py или вынесите в отдельную функцию)
+    # Инициализация схемы (скопируйте из init_db.py или вынесите в отдельную функцию)
     conn = sqlite3.connect(db_path)
     conn.executescript('''
         CREATE TABLE IF NOT EXISTS accounts (
@@ -33,7 +30,9 @@ def temp_db():
             charge REAL,
             FOREIGN KEY(account_id) REFERENCES accounts(id)
         );
-        -- Добавьте остальные таблицы, если есть
+        CREATE INDEX IF NOT EXISTS idx_accounts_address ON accounts(address);
+        CREATE INDEX IF NOT EXISTS idx_accounts_month_year ON accounts(month, year);
+        -- добавьте другие таблицы, если есть
     ''')
     conn.commit()
     conn.close()
@@ -41,17 +40,25 @@ def temp_db():
     os.close(db_fd)
     os.unlink(db_path)
 
-# Фикстура приложения Flask для тестирования
 @pytest.fixture
-def client():
-    flask_app.config['TESTING'] = True
-    flask_app.config['DATABASE'] = temp_db  # подмена пути БД
-    with flask_app.test_client() as client:
-        yield client
+def app(temp_db):
+    """Создаёт экземпляр приложения с тестовой конфигурацией."""
+    # Подменяем глобальную переменную DB_PATH (если она используется)
+    frontend.DB_PATH = temp_db
+    # Если используется config, также задаём:
+    frontend.app.config['TESTING'] = True
+    frontend.app.config['DATABASE'] = temp_db
+    return frontend.app
 
-# Мок для AI API
+@pytest.fixture
+def client(app):
+    """Возвращает тестовый клиент Flask."""
+    return app.test_client()
+
+# Фикстуры для моков API
 @pytest.fixture
 def mock_ai_response():
+    from unittest.mock import patch, MagicMock
     with patch('ai_analyzer.requests.post') as mock_post:
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -61,9 +68,9 @@ def mock_ai_response():
         mock_post.return_value = mock_response
         yield mock_post
 
-# Мок для Telegram
 @pytest.fixture
 def mock_telegram():
+    from unittest.mock import patch, MagicMock
     with patch('telegram_notifier.requests.post') as mock_post:
         mock_response = MagicMock()
         mock_response.status_code = 200
