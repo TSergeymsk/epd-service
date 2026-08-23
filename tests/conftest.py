@@ -10,10 +10,8 @@ import frontend
 
 @pytest.fixture(scope='function')
 def temp_db():
-    """Создаёт временную БД с полной схемой через init_database."""
     db_fd, db_path = tempfile.mkstemp(suffix='.db')
-    # Используем реальную функцию инициализации
-    init_database(db_path)
+    init_database(db_path)  # используем реальную функцию инициализации
     yield db_path
     os.close(db_fd)
     os.unlink(db_path)

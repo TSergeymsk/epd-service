@@ -19,7 +19,7 @@ config = configparser.ConfigParser()
 config.read(get_config_path())
 DB_PATH = config.get('paths', 'db_path')
 
-# Определение схемы базы данных (SQL)
+# Определение схемы базы данных (SQL) - без изменений
 SCHEMA = """
 -- Таблица лицевых счетов
 CREATE TABLE IF NOT EXISTS accounts (
@@ -120,8 +120,14 @@ CREATE INDEX IF NOT EXISTS idx_address_analysis_address ON address_analysis(addr
 CREATE INDEX IF NOT EXISTS idx_address_analysis_period ON address_analysis(period_id);
 """
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
+def init_database(db_path=None):
+    """
+    Инициализирует базу данных по указанному пути.
+    Если путь не передан, используется DB_PATH из конфига.
+    """
+    if db_path is None:
+        db_path = DB_PATH
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor.execute("PRAGMA journal_mode = WAL;")
     cursor.execute("PRAGMA busy_timeout = 5000;")
@@ -129,7 +135,7 @@ def init_db():
     cursor.executescript(INDEXES)
     conn.commit()
     conn.close()
-    print(f"База данных успешно инициализирована: {DB_PATH}")
+    print(f"База данных успешно инициализирована: {db_path}")
     print("Режим WAL включён, таймаут ожидания установлен в 5000 мс.")
 
 def check_db():
@@ -154,4 +160,4 @@ if __name__ == "__main__":
             sys.exit(0)
         os.remove(DB_PATH)
         print("Старая база удалена.")
-    init_db()
+    init_database()  # вызов без аргументов использует DB_PATH
