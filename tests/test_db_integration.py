@@ -17,7 +17,6 @@ def test_db_schema(temp_db):
 def test_foreign_key_constraint(temp_db):
     init_database(temp_db)
     conn = sqlite3.connect(temp_db)
-    # Включаем поддержку внешних ключей
     conn.execute("PRAGMA foreign_keys = ON")
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("INSERT INTO charges (account_id, service_name, charge) VALUES (999, 'ХВС', 100)")

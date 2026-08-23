@@ -10,7 +10,6 @@ import frontend
 @pytest.fixture(scope='function')
 def temp_db():
     db_fd, db_path = tempfile.mkstemp(suffix='.db')
-    # Инициализация схемы (можно вызвать init_database, но чтобы не зависеть, создаём сами)
     conn = sqlite3.connect(db_path)
     conn.executescript('''
         CREATE TABLE IF NOT EXISTS accounts (
@@ -48,7 +47,7 @@ def app(temp_db):
 def client(app):
     return app.test_client()
 
-# Моки для внешних API (если нужны)
+# Моки для внешних API
 @pytest.fixture
 def mock_ai_response():
     from unittest.mock import patch, MagicMock
