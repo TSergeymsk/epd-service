@@ -4,6 +4,13 @@ import sys
 from unittest.mock import patch, MagicMock
 import getmail_filter
 
+class MockConfig:
+    """Имитирует ConfigParser с методом get(section, option)."""
+    def __init__(self, data):
+        self.data = data
+    def get(self, section, key):
+        return self.data.get(section, {}).get(key)
+
 def test_get_rules_from_db(temp_db):
     conn, path = temp_db
     conn.execute("""
@@ -39,25 +46,32 @@ def test_mark_imported():
 
 def test_main_no_match():
     raw_email = b"From: test@example.com\nTo: other@example.com\nSubject: Hello\n\nBody"
+    config_data = {
+        'logging': {'log_dir': '/tmp'},
+        'paths': {'email_temp_dir': '/tmp'}
+    }
     with patch('sys.stdin.buffer.read', return_value=raw_email), \
          patch('sys.stdout.buffer.write') as mock_write, \
-         patch('getmail_filter.load_ini_config') as mock_config, \
+         patch('getmail_filter.load_ini_config', return_value=MockConfig(config_data)), \
          patch('getmail_filter.get_rules_from_db', return_value=[]), \
          patch('getmail_filter.get_db_connection') as mock_db_conn, \
          patch('getmail_filter.setup_logging') as mock_setup_logging, \
-         patch('sys.exit') as mock_exit:
+         pytest.raises(SystemExit) as exc_info:
         mock_db_conn.return_value = MagicMock()
-        mock_config.return_value = {'logging': {'log_dir': '/tmp'}}
         mock_setup_logging.return_value = MagicMock()
         getmail_filter.main()
+        assert exc_info.value.code == 0
         mock_write.assert_called_once_with(raw_email)
-        mock_exit.assert_not_called()
 
 def test_main_matches_and_spawns():
     raw_email = b"From: test@example.com\nTo: me@example.com\nSubject: Test Subject\nMessage-ID: <abc@test>\n\nBody"
+    config_data = {
+        'logging': {'log_dir': '/tmp'},
+        'paths': {'email_temp_dir': '/tmp'}
+    }
     with patch('sys.stdin.buffer.read', return_value=raw_email), \
          patch('sys.stdout.buffer.write') as mock_write, \
-         patch('getmail_filter.load_ini_config') as mock_config, \
+         patch('getmail_filter.load_ini_config', return_value=MockConfig(config_data)), \
          patch('getmail_filter.get_rules_from_db') as mock_rules, \
          patch('getmail_filter.mark_imported') as mock_mark, \
          patch('subprocess.Popen') as mock_popen, \
@@ -65,7 +79,7 @@ def test_main_matches_and_spawns():
          patch('hashlib.md5') as mock_md5, \
          patch('getmail_filter.get_db_connection') as mock_db_conn, \
          patch('getmail_filter.setup_logging') as mock_setup_logging, \
-         patch('sys.exit') as mock_exit:
+         pytest.raises(SystemExit) as exc_info:
         mock_db_conn.return_value = MagicMock()
         mock_setup_logging.return_value = MagicMock()
         mock_md5.return_value.hexdigest.return_value = 'abcd1234'
@@ -73,9 +87,8 @@ def test_main_matches_and_spawns():
             {'id': 1, 'from_pattern': 'test@example.com', 'to_pattern': 'me@example.com',
              'subject_pattern': 'Test', 'parser_script': 'parser.py'}
         ]
-        mock_config.return_value = {'paths': {'email_temp_dir': '/tmp'}, 'logging': {'log_dir': '/tmp'}}
         getmail_filter.main()
+        assert exc_info.value.code == 0
         mock_write.assert_called_once_with(raw_email)
         mock_mark.assert_called()
         mock_popen.assert_called()
-        mock_exit.assert_not_called()

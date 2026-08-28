@@ -122,6 +122,9 @@ def main():
 
     # Сохраняем письмо во временную папку
     temp_dir = config.get('paths', 'email_temp_dir')
+    temp_dir = config.get('paths', 'email_temp_dir')
+    if not temp_dir:
+        temp_dir = '/tmp'  # fallback
     os.makedirs(temp_dir, exist_ok=True)
     timestamp = int(time.time())
     filename = f"email_{timestamp}_{message_id[:8]}.eml"
