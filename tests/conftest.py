@@ -9,16 +9,14 @@ import os
 # Добавляем корень проекта в PYTHONPATH
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils import get_db_connection, load_ini_config
-
 @pytest.fixture
 def temp_db():
-    """Создаёт временную БД и возвращает путь и соединение."""
+    """Создаёт временную БД и возвращает соединение и путь."""
     fd, path = tempfile.mkstemp(suffix='.db')
     os.close(fd)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
-    # Создаём структуру БД (минимум для тестов)
+    # Минимальная схема для тестов
     conn.executescript('''
         CREATE TABLE accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, account_number TEXT UNIQUE, address TEXT);
         CREATE TABLE periods (id INTEGER PRIMARY KEY AUTOINCREMENT, year INTEGER, month INTEGER, start_date TEXT);
@@ -39,12 +37,11 @@ def temp_db():
 
 @pytest.fixture
 def mock_config():
-    """Возвращает конфиг для тестов (без реальных ключей)."""
-    config = {
+    """Возвращает словарь с тестовым конфигом."""
+    return {
         'paths': {'db_path': ':memory:', 'email_temp_dir': '/tmp'},
         'openrouter': {'api_key': 'test_key', 'model': 'test-model', 'url': 'https://test.com/v1', 'timeout': '10'},
         'telegram': {'bot_token': 'test_token', 'chat_id': '12345'},
         'logging': {'log_dir': '/tmp/logs'},
         'getmail_filter': {'from_pattern': 'test@example.com', 'to_pattern': 'me@example.com', 'subject_pattern': 'Test'}
     }
-    return config
