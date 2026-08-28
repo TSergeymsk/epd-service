@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Оркестратор для AI-анализа и отправки Telegram-сообщений.
-Отправляет сообщение как обычный текст (без форматирования).
 """
 import os
 import sys
@@ -10,23 +9,33 @@ import json
 import requests
 import yaml
 import re
+import html
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from utils import get_db_connection, setup_logging, load_ai_config, load_ini_config
+from utils import get_db_connection, load_ai_config, load_ini_config
 
-logger = setup_logging('orchestrator')
-
-# Конфигурация
+# Конфигурация (глобальная, без логгера)
 INI_CONFIG = load_ini_config()
 AI_CONFIG = load_ai_config()
 
 MAX_RETRIES = 3
-SLEEP_BETWEEN_REQUESTS = 5  # увеличен для предотвращения 429
+SLEEP_BETWEEN_REQUESTS = 5
 
+# Логгер будет инициализирован в main()
+logger = None
+
+def setup_logger():
+    """Инициализирует логгер (вызывается в main)."""
+    global logger
+    if logger is not None:
+        return
+    from utils import setup_logging
+    logger = setup_logging('orchestrator')
+
+# --- Остальные функции (без изменений) ---
 def clean_markdown(text):
-    """Удаляет Markdown-разметку из текста."""
     if not text:
         return text
     text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
@@ -39,6 +48,11 @@ def clean_markdown(text):
     text = re.sub(r'^(\s*[-*_]{3,}\s*)$', '', text, flags=re.MULTILINE)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
+
+def escape_html(text):
+    if not text:
+        return text
+    return html.escape(text)
 
 def is_ai_configured():
     ai_cfg = AI_CONFIG.get('ai', {})
@@ -177,7 +191,8 @@ def format_prompt(address, period_ym, current_data, prev_data, prev_ym, last_12_
     prompts_conf = AI_CONFIG.get('prompts', {})
     template = prompts_conf.get('analysis')
     if not template:
-        logger.error("Шаблон промта (prompts.analysis) не задан в ai_config.yaml")
+        if logger:
+            logger.error("Шаблон промта (prompts.analysis) не задан в ai_config.yaml")
         return None
 
     total_current = sum(item['amount_due'] for item in current_data) if current_data else 0
@@ -228,7 +243,8 @@ def call_ai_api(prompt, retries=3):
     max_tokens = ai_cfg.get('max_tokens')
 
     if not all([url, model, api_key, timeout is not None, temperature is not None, max_tokens is not None]):
-        logger.error("Не все параметры AI заданы в конфиге")
+        if logger:
+            logger.error("Не все параметры AI заданы в конфиге")
         return None, None
 
     headers = {"Content-Type": "application/json"}
@@ -254,12 +270,14 @@ def call_ai_api(prompt, retries=3):
 
     for attempt in range(retries):
         try:
-            logger.info(f"Отправка запроса к {url}, модель {model}, длина промпта: {len(prompt)} символов (попытка {attempt+1}/{retries})")
+            if logger:
+                logger.info(f"Отправка запроса к {url}, модель {model}, длина промпта: {len(prompt)} символов (попытка {attempt+1}/{retries})")
             response = requests.post(url, headers=headers, json=payload, timeout=timeout)
             if response.status_code == 429:
                 retry_after = response.headers.get('Retry-After')
                 wait = int(retry_after) if retry_after else 30
-                logger.warning(f"Получен 429 Too Many Requests. Ожидание {wait} секунд перед повторной попыткой.")
+                if logger:
+                    logger.warning(f"Получен 429 Too Many Requests. Ожидание {wait} секунд перед повторной попыткой.")
                 time.sleep(wait)
                 continue
             response.raise_for_status()
@@ -269,23 +287,28 @@ def call_ai_api(prompt, retries=3):
                 tokens = data.get('usage', {}).get('total_tokens')
                 return answer, tokens
             else:
-                logger.error(f"Неожиданный формат ответа: {data}")
+                if logger:
+                    logger.error(f"Неожиданный формат ответа: {data}")
                 return None, None
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 429:
                 continue
-            logger.exception(f"Ошибка при вызове AI API: {e}")
+            if logger:
+                logger.exception(f"Ошибка при вызове AI API: {e}")
             return None, None
         except Exception as e:
-            logger.exception(f"Ошибка при вызове AI API: {e}")
+            if logger:
+                logger.exception(f"Ошибка при вызове AI API: {e}")
             return None, None
 
-    logger.error(f"Не удалось получить ответ от AI после {retries} попыток")
+    if logger:
+        logger.error(f"Не удалось получить ответ от AI после {retries} попыток")
     return None, None
 
 def process_llm_requests(conn):
     if not is_ai_configured():
-        logger.warning("AI не настроен. Пропускаем все запросы к LLM.")
+        if logger:
+            logger.warning("AI не настроен. Пропускаем все запросы к LLM.")
         conn.execute("""
             UPDATE llm_requests
             SET status = 'failed', last_error = 'AI не настроен', updated_at = CURRENT_TIMESTAMP
@@ -297,7 +320,8 @@ def process_llm_requests(conn):
     requests_list = get_pending_llm_requests(conn)
     if not requests_list:
         return
-    logger.info(f"Найдено {len(requests_list)} запросов к LLM для обработки")
+    if logger:
+        logger.info(f"Найдено {len(requests_list)} запросов к LLM для обработки")
     for req in requests_list:
         req_id = req['id']
         address = req['address']
@@ -306,20 +330,23 @@ def process_llm_requests(conn):
 
         period = get_period_details(conn, period_id)
         if not period:
-            logger.error(f"Период {period_id} не найден, пропускаем")
+            if logger:
+                logger.error(f"Период {period_id} не найден, пропускаем")
             continue
         period_ym = f"{period['year']}-{period['month']:02d}"
 
         current, prev_data, prev_ym, last_12_data = get_aggregated_data(conn, address, period_id)
         if not current:
-            logger.warning(f"Нет данных для адреса {address} за {period_ym}, пропускаем")
+            if logger:
+                logger.warning(f"Нет данных для адреса {address} за {period_ym}, пропускаем")
             conn.execute("UPDATE llm_requests SET status = 'failed', last_error = 'Нет данных для анализа' WHERE id = ?", (req_id,))
             conn.commit()
             continue
 
         prompt = format_prompt(address, period_ym, current, prev_data, prev_ym, last_12_data)
         if prompt is None:
-            logger.error(f"Не удалось сформировать промт для {address} за {period_ym}, пропускаем")
+            if logger:
+                logger.error(f"Не удалось сформировать промт для {address} за {period_ym}, пропускаем")
             conn.execute("UPDATE llm_requests SET status = 'failed', last_error = 'Ошибка формирования промта' WHERE id = ?", (req_id,))
             conn.commit()
             continue
@@ -343,7 +370,8 @@ def process_llm_requests(conn):
                 WHERE id = ?
             """, (response_text, tokens, model, provider, req_id))
             conn.commit()
-            logger.info(f"Запрос {req_id} успешно обработан, токенов: {tokens}, длина ответа: {len(response_text)}")
+            if logger:
+                logger.info(f"Запрос {req_id} успешно обработан, токенов: {tokens}, длина ответа: {len(response_text)}")
         else:
             new_attempts = attempts + 1
             error_msg = "Ответ от AI пустой" if response_text is None else "Получен пустой ответ"
@@ -359,11 +387,11 @@ def process_llm_requests(conn):
                 WHERE id = ?
             """, (status, new_attempts, error, req_id))
             conn.commit()
-            logger.error(f"Запрос {req_id} не удался: {error}, попытка {new_attempts}/{MAX_RETRIES}")
+            if logger:
+                logger.error(f"Запрос {req_id} не удался: {error}, попытка {new_attempts}/{MAX_RETRIES}")
 
         time.sleep(SLEEP_BETWEEN_REQUESTS)
 
-# --- Генерация сообщения как обычный текст (без HTML) ---
 def generate_telegram_message_for_period(conn, address, period_id):
     period = get_period_details(conn, period_id)
     period_str = f"{period['year']}-{period['month']:02d}"
@@ -371,7 +399,6 @@ def generate_telegram_message_for_period(conn, address, period_id):
     current, _, _, _ = get_aggregated_data(conn, address, period_id)
     total = sum(item['amount_due'] for item in current) if current else 0
 
-    # Шапка (обычный текст, без HTML)
     header_lines = []
     header_lines.append("🏠 Анализ ЕПД")
     header_lines.append(f"Адрес: {address}")
@@ -384,7 +411,6 @@ def generate_telegram_message_for_period(conn, address, period_id):
             header_lines.append(f"🔹 {item['name']}: {item['amount_due']:,.2f} руб. (кол-во: {item['quantity']:.3f})")
     header = "\n".join(header_lines)
 
-    # Получаем AI-анализ
     cur = conn.execute("""
         SELECT response_text, status, last_error
         FROM llm_requests
@@ -397,7 +423,6 @@ def generate_telegram_message_for_period(conn, address, period_id):
 
     if ai_available:
         analysis_text = llm_row['response_text']
-        # Очищаем от Markdown
         analysis_text = clean_markdown(analysis_text)
         analysis = f"--- Анализ ---\n{analysis_text}"
     else:
@@ -410,11 +435,10 @@ def generate_telegram_message_for_period(conn, address, period_id):
 
     full_text = header + "\n\n" + analysis
 
-    # Обрезаем до 4000 символов (Telegram лимит 4096)
     MAX_TOTAL = 4000
     if len(full_text) > MAX_TOTAL:
-        logger.warning(f"Общее сообщение для {address} слишком длинное ({len(full_text)}), обрезаем до {MAX_TOTAL}")
-        # Обрезаем по границе строки, чтобы не разрывать слова
+        if logger:
+            logger.warning(f"Общее сообщение для {address} слишком длинное ({len(full_text)}), обрезаем до {MAX_TOTAL}")
         cut_point = full_text.rfind('\n', 0, MAX_TOTAL)
         if cut_point == -1:
             cut_point = MAX_TOTAL
@@ -426,7 +450,8 @@ def process_telegram_messages(conn):
     messages = get_pending_telegram_messages(conn)
     if not messages:
         return
-    logger.info(f"Найдено {len(messages)} сообщений для отправки в Telegram")
+    if logger:
+        logger.info(f"Найдено {len(messages)} сообщений для отправки в Telegram")
     bot_token = INI_CONFIG.get('telegram', 'bot_token')
     chat_id = INI_CONFIG.get('telegram', 'chat_id')
     for msg in messages:
@@ -445,13 +470,13 @@ def process_telegram_messages(conn):
             """, (message_text, msg_id))
             conn.commit()
 
-        logger.info(f"Отправка сообщения {msg_id}, длина {len(message_text)} символов")
+        if logger:
+            logger.info(f"Отправка сообщения {msg_id}, длина {len(message_text)} символов")
 
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         payload = {
             'chat_id': chat_id,
             'text': message_text
-            # Без parse_mode – отправляем как обычный текст
         }
         try:
             response = requests.post(url, json=payload, timeout=10)
@@ -462,7 +487,8 @@ def process_telegram_messages(conn):
                 WHERE id = ?
             """, (msg_id,))
             conn.commit()
-            logger.info(f"Сообщение {msg_id} отправлено в Telegram")
+            if logger:
+                logger.info(f"Сообщение {msg_id} отправлено в Telegram")
         except Exception as e:
             new_attempts = attempts + 1
             if new_attempts >= MAX_RETRIES:
@@ -477,7 +503,8 @@ def process_telegram_messages(conn):
                 WHERE id = ?
             """, (status, new_attempts, error, msg_id))
             conn.commit()
-            logger.error(f"Ошибка отправки сообщения {msg_id}: {e} (попытка {new_attempts}/{MAX_RETRIES})")
+            if logger:
+                logger.error(f"Ошибка отправки сообщения {msg_id}: {e} (попытка {new_attempts}/{MAX_RETRIES})")
         time.sleep(SLEEP_BETWEEN_REQUESTS)
 
 def create_telegram_messages_for_successful_llm(conn):
@@ -497,9 +524,12 @@ def create_telegram_messages_for_successful_llm(conn):
             VALUES (?, ?, ?, 'pending')
         """, (address, period_id, msg_text))
         conn.commit()
-        logger.info(f"Создано сообщение для Telegram для {address} за период {period_id}")
+        if logger:
+            logger.info(f"Создано сообщение для Telegram для {address} за период {period_id}")
 
 def main():
+    global logger
+    setup_logger()  # инициализируем глобальный logger
     conn = get_db_connection()
     try:
         create_telegram_messages_for_successful_llm(conn)

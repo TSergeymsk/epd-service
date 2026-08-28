@@ -20,9 +20,10 @@ def get_db_path():
     config.read(get_config_path())
     return config.get('paths', 'db_path')
 
+DB_PATH = get_db_path()
+
 # Схема с новыми таблицами (добавляем только отсутствующие)
 NEW_TABLES = """
--- Таблица правил фильтрации для getmail
 CREATE TABLE IF NOT EXISTS filter_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -35,7 +36,6 @@ CREATE TABLE IF NOT EXISTS filter_rules (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Журнал импортированных писем (для исключения дублирования)
 CREATE TABLE IF NOT EXISTS imported_emails (
     mail_id TEXT PRIMARY KEY,
     rule_id INTEGER,
@@ -46,7 +46,6 @@ CREATE TABLE IF NOT EXISTS imported_emails (
     FOREIGN KEY (rule_id) REFERENCES filter_rules(id)
 );
 
--- Запросы к LLM (анализ)
 CREATE TABLE IF NOT EXISTS llm_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     address TEXT NOT NULL,
@@ -59,7 +58,7 @@ CREATE TABLE IF NOT EXISTS llm_requests (
     request_payload TEXT,
     response_text TEXT,
     tokens_used INTEGER,
-    status TEXT DEFAULT 'pending',   -- pending, processing, success, failed, retry_limit
+    status TEXT DEFAULT 'pending',
     attempts INTEGER DEFAULT 0,
     last_error TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -67,7 +66,6 @@ CREATE TABLE IF NOT EXISTS llm_requests (
     FOREIGN KEY (period_id) REFERENCES periods(id)
 );
 
--- Сообщения для Telegram
 CREATE TABLE IF NOT EXISTS telegram_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     address TEXT NOT NULL,
@@ -75,7 +73,7 @@ CREATE TABLE IF NOT EXISTS telegram_messages (
     message_text TEXT NOT NULL,
     parse_mode TEXT DEFAULT 'HTML',
     sent_at TIMESTAMP,
-    status TEXT DEFAULT 'pending',   -- pending, sent, failed
+    status TEXT DEFAULT 'pending',
     attempts INTEGER DEFAULT 0,
     last_error TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -83,7 +81,6 @@ CREATE TABLE IF NOT EXISTS telegram_messages (
 );
 """
 
-# Индексы для новых таблиц
 NEW_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_llm_requests_address_period ON llm_requests(address, period_id);
 CREATE INDEX IF NOT EXISTS idx_llm_requests_status ON llm_requests(status);
@@ -92,7 +89,6 @@ CREATE INDEX IF NOT EXISTS idx_telegram_messages_period ON telegram_messages(per
 CREATE INDEX IF NOT EXISTS idx_imported_emails_status ON imported_emails(status);
 """
 
-# Существующие таблицы (проверяем, что они есть)
 BASE_TABLES = """
 CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -162,23 +158,33 @@ CREATE TABLE IF NOT EXISTS raw_imports (
 );
 """
 
+def check_db(db_path=None):
+    """Проверяет существование БД и наличие таблицы accounts."""
+    if db_path is None:
+        db_path = DB_PATH
+    if not os.path.exists(db_path):
+        return False
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='accounts';")
+        result = cursor.fetchone()
+        conn.close()
+        return result is not None
+    except sqlite3.Error:
+        return False
+
 def init_db():
-    db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # Включаем WAL и таймаут
     cursor.execute("PRAGMA journal_mode = WAL;")
     cursor.execute("PRAGMA busy_timeout = 5000;")
     
-    # Создаём базовые таблицы (если их нет)
     cursor.executescript(BASE_TABLES)
-    
-    # Создаём новые таблицы
     cursor.executescript(NEW_TABLES)
     cursor.executescript(NEW_INDEXES)
     
-    # Добавляем индексы для существующих таблиц (если их нет)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_charges_account_period ON charges(account_id, period_id);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_charges_service ON charges(service_id);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_period_info_account ON account_period_info(account_id);")
@@ -188,18 +194,16 @@ def init_db():
     
     conn.commit()
     conn.close()
-    print(f"База данных инициализирована/обновлена: {db_path}")
+    print(f"База данных инициализирована/обновлена: {DB_PATH}")
     print("Все таблицы и индексы созданы (если отсутствовали).")
 
 def check_and_migrate():
-    db_path = get_db_path()
-    if not os.path.exists(db_path):
+    if not os.path.exists(DB_PATH):
         print("База данных не существует. Будет создана новая.")
         init_db()
         return
     
-    # Проверяем наличие ключевых таблиц
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='filter_rules';")
     if not cursor.fetchone():
@@ -212,5 +216,3 @@ def check_and_migrate():
 
 if __name__ == "__main__":
     check_and_migrate()
-    # Если нужно принудительно создать всё заново (с потерей данных) – раскомментировать
-    # init_db()
