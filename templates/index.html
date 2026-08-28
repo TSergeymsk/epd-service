@@ -63,6 +63,57 @@
         .inline-buttons { display: flex; gap: 5px; margin-top: 5px; }
         .hidden { display: none !important; }
         .extra-charts-row { display: flex; gap: 20px; flex-wrap: wrap; }
+
+        /* Стили для модального окна деталей */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-content {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            max-width: 800px;
+            max-height: 80%;
+            overflow-y: auto;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            width: 90%;
+        }
+        .modal-content pre {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            background: #f4f6f8;
+            padding: 10px;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+        .modal-close {
+            float: right;
+            background: #e74c3c;
+            color: white;
+            border: none;
+            padding: 5px 15px;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        .action-buttons {
+            margin-top: 15px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .action-buttons button {
+            padding: 6px 15px;
+            font-size: 0.9rem;
+        }
+        .action-buttons .btn-details { background: #2c3e50; }
+        .action-buttons .btn-retry-ai { background: #e67e22; }
+        .action-buttons .btn-retry-tg { background: #27ae60; }
     </style>
 </head>
 <body>
@@ -118,6 +169,21 @@
             <div id="analysisContent" class="analysis-content">
                 <p class="no-data">Загрузка анализа...</p>
             </div>
+            <!-- Блок кнопок управления -->
+            <div class="action-buttons" id="actionButtons">
+                <button class="btn-details" onclick="showLLMDetails()">📄 Детали AI</button>
+                <button class="btn-retry-ai" onclick="retryAI()">🔄 Повтор AI</button>
+                <button class="btn-retry-tg" onclick="retryTelegram()">📨 Отправить TG</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Модальное окно для деталей LLM -->
+    <div class="modal-overlay" id="llmDetailsModal">
+        <div class="modal-content">
+            <button class="modal-close" onclick="closeLLMDetails()">✕ Закрыть</button>
+            <h4>Детали запроса к LLM</h4>
+            <pre id="llmDetailsContent">Загрузка...</pre>
         </div>
     </div>
 
@@ -168,8 +234,8 @@
         let currentMonthIndex = -1;
         
         // Для мобильной версии
-        let mobileWindowStart = 0; // индекс первого отображаемого месяца в окне
-        const MOBILE_WINDOW_SIZE = 5; // показываем 5 месяцев (текущий +2 слева +2 справа)
+        let mobileWindowStart = 0;
+        const MOBILE_WINDOW_SIZE = 5;
 
         async function loadAddresses() {
             try {
@@ -179,7 +245,6 @@
                     return;
                 }
                 addresses = await response.json();
-                console.log('Получены адреса:', addresses);
                 const addressSel = document.getElementById('addressSelect');
                 addressSel.innerHTML = '<option value="">-- Выберите адрес --</option>';
                 if (addresses.length === 0) {
@@ -204,7 +269,6 @@
         async function loadAccountsForAddress(address) {
             const response = await fetch(`/api/accounts_by_address?address=${encodeURIComponent(address)}`);
             accounts = await response.json();
-            console.log('Счета для адреса', address, accounts);
             const accountSel = document.getElementById('accountSelect');
             accountSel.innerHTML = '';
             accounts.forEach(acc => {
@@ -233,7 +297,6 @@
         async function loadServices() {
             const response = await fetch('/api/services');
             services = await response.json();
-            console.log('Услуги:', services);
             const serviceSel = document.getElementById('serviceSelect');
             serviceSel.innerHTML = '';
             services.forEach(s => {
@@ -283,7 +346,6 @@
             accountIds.forEach(id => params.append('account_ids', id));
             const response = await fetch('/api/periods?' + params.toString());
             periods = await response.json();
-            console.log('Периоды:', periods);
             populatePeriodSelects(true);
         }
 
@@ -370,18 +432,15 @@
             params.append('end_month', endMonth);
             serviceIds.forEach(id => params.append('service_ids', id));
 
-            console.log('Запрос данных с параметрами:', params.toString());
             const response = await fetch('/api/data?' + params.toString());
             if (!response.ok) {
                 alert('Ошибка загрузки данных');
                 return;
             }
             const data = await response.json();
-            console.log('Получены данные:', data);
             currentData = data;
             currentMonthIndex = data.months.length > 0 ? data.months.length - 1 : -1;
             
-            // Инициализируем окно мобильной таблицы, чтобы выбранный месяц был в центре
             if (currentMonthIndex >= 0) {
                 const totalMonths = data.months.length;
                 mobileWindowStart = Math.max(0, Math.min(currentMonthIndex - 2, totalMonths - MOBILE_WINDOW_SIZE));
@@ -401,6 +460,8 @@
                     loadAnalysisForMonth(address, year, month);
                 }
             }
+            // Показываем кнопки действий, если есть месяц
+            document.getElementById('actionButtons').style.display = (currentMonthIndex >= 0) ? 'flex' : 'none';
         }
 
         async function loadAnalysisForMonth(address, year, month) {
@@ -471,23 +532,23 @@
             );
             totalChart.update();
 
-            // При смене месяца двигаем окно мобильной таблицы, чтобы выбранный был в центре
             const totalMonths = currentData.months.length;
             mobileWindowStart = Math.max(0, Math.min(index - 2, totalMonths - MOBILE_WINDOW_SIZE));
             
             updatePieChartForMonth(index);
             highlightTableColumn(index);
-            updateMobileTable(currentData); // обновляем мобильную таблицу
+            updateMobileTable(currentData);
 
             const [year, month] = selectedMonth.split('-').map(Number);
             const address = document.getElementById('addressSelect').value;
             if (address) {
                 loadAnalysisForMonth(address, year, month);
             }
+            // Показываем кнопки
+            document.getElementById('actionButtons').style.display = 'flex';
         }
 
         function shiftWindow(direction) {
-            // direction: -1 влево, 1 вправо
             const totalMonths = currentData.months.length;
             const newStart = mobileWindowStart + direction;
             if (newStart >= 0 && newStart + MOBILE_WINDOW_SIZE <= totalMonths) {
@@ -513,14 +574,12 @@
                 return;
             }
 
-            // Определяем видимые месяцы
             const visibleIndices = [];
             for (let i = mobileWindowStart; i < mobileWindowStart + MOBILE_WINDOW_SIZE; i++) {
                 if (i < data.months.length) visibleIndices.push(i);
             }
             const visibleMonths = visibleIndices.map(i => data.months[i]);
 
-            // Заголовки
             let headerHtml = '<th>Услуга</th>';
             visibleIndices.forEach(idx => {
                 const month = data.months[idx];
@@ -528,7 +587,6 @@
             });
             thead.innerHTML = headerHtml;
 
-            // Строки услуг
             nonZeroServices.forEach(name => {
                 let rowHtml = `<td class="service-name">${name}</td>`;
                 visibleIndices.forEach(idx => {
@@ -540,7 +598,6 @@
                 tbody.appendChild(row);
             });
 
-            // Итоговая строка
             let totalRowHtml = '<td class="service-name">ИТОГО</td>';
             visibleIndices.forEach(idx => {
                 const val = data.totals[idx];
@@ -551,7 +608,6 @@
             totalRow.innerHTML = totalRowHtml;
             tbody.appendChild(totalRow);
 
-            // Обновляем текст диапазона
             const rangeSpan = document.getElementById('windowRange');
             if (visibleMonths.length > 0) {
                 rangeSpan.textContent = `${visibleMonths[0]} — ${visibleMonths[visibleMonths.length-1]}`;
@@ -657,7 +713,6 @@
         }
 
         function updateTable(data) {
-            // Десктопная таблица (все столбцы)
             const thead = document.querySelector('#detailsTable thead tr');
             const tbody = document.querySelector('#detailsTable tbody');
             thead.innerHTML = '';
@@ -714,6 +769,80 @@
             if (currentData) updateTable(currentData);
         }
 
+        // --- Новые функции для управления ---
+        async function showLLMDetails() {
+            const address = document.getElementById('addressSelect').value;
+            if (!address || currentMonthIndex < 0) {
+                alert('Выберите адрес и месяц');
+                return;
+            }
+            const selectedMonth = currentData.months[currentMonthIndex];
+            const [year, month] = selectedMonth.split('-').map(Number);
+            const resp = await fetch(`/api/llm_details?address=${encodeURIComponent(address)}&year=${year}&month=${month}`);
+            const modal = document.getElementById('llmDetailsModal');
+            const content = document.getElementById('llmDetailsContent');
+            if (!resp.ok) {
+                content.textContent = 'Детали не найдены';
+                modal.style.display = 'flex';
+                return;
+            }
+            const data = await resp.json();
+            content.textContent = JSON.stringify(data, null, 2);
+            modal.style.display = 'flex';
+        }
+
+        function closeLLMDetails() {
+            document.getElementById('llmDetailsModal').style.display = 'none';
+        }
+
+        async function retryAI() {
+            const address = document.getElementById('addressSelect').value;
+            if (!address || currentMonthIndex < 0) {
+                alert('Выберите адрес и месяц');
+                return;
+            }
+            const selectedMonth = currentData.months[currentMonthIndex];
+            const [year, month] = selectedMonth.split('-').map(Number);
+            const resp = await fetch('/api/retry_ai', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({address, year, month})
+            });
+            if (resp.ok) {
+                alert('Запрос на повторный AI-анализ отправлен. Оркестратор обработает его в ближайшее время.');
+            } else {
+                const err = await resp.text();
+                alert('Ошибка: ' + err);
+            }
+        }
+
+        async function retryTelegram() {
+            const address = document.getElementById('addressSelect').value;
+            if (!address || currentMonthIndex < 0) {
+                alert('Выберите адрес и месяц');
+                return;
+            }
+            const selectedMonth = currentData.months[currentMonthIndex];
+            const [year, month] = selectedMonth.split('-').map(Number);
+            const resp = await fetch('/api/retry_telegram', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({address, year, month})
+            });
+            if (resp.ok) {
+                alert('Запрос на повторную отправку в Telegram отправлен.');
+            } else {
+                const err = await resp.text();
+                alert('Ошибка: ' + err);
+            }
+        }
+
+        // Закрытие модального окна по клику вне области
+        document.getElementById('llmDetailsModal').addEventListener('click', function(e) {
+            if (e.target === this) closeLLMDetails();
+        });
+
+        // --- Остальные функции ---
         async function onAddressChange() {
             const address = document.getElementById('addressSelect').value;
             if (!address) {

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-""" Фильтр для getmail, который проверяет входящие письма по заданным шаблонам,
-сохраняет подходящие письма во временный каталог и запускает email_parser.py.
-Письмо передаётся на stdin и должно быть выведено в stdout без изменений.
+"""
+Фильтр для getmail. Проверяет входящие письма по правилам из БД.
+При совпадении запускает соответствующий парсер асинхронно,
+избегая дублирования по Message-ID.
 """
 import os
 import sys
@@ -14,123 +15,143 @@ import time
 import hashlib
 from pathlib import Path
 
-def get_config_path():
-    env_path = os.environ.get('EPD_CONFIG')
-    if env_path:
-        return env_path
-    return str(Path(__file__).parent / 'config.ini')
+# Добавляем путь к корню проекта
+sys.path.insert(0, str(Path(__file__).parent))
+from utils import get_db_connection, setup_logging, load_ini_config
 
-def load_config(config_path):
-    config = configparser.ConfigParser()
-    config.read(config_path)
-    return config
+logger = logging.getLogger(__name__)
 
-def setup_logging(log_dir):
-    os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, 'getmail_filter.log')
-    # Только файловый лог, без stderr, чтобы не раздражать getmail
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file)
-        ]
+def get_rules_from_db():
+    """Загружает активные правила фильтрации из БД."""
+    conn = get_db_connection()
+    cur = conn.execute("""
+        SELECT id, from_pattern, to_pattern, subject_pattern, parser_script
+        FROM filter_rules
+        WHERE enabled = 1
+        ORDER BY priority DESC
+    """)
+    rules = cur.fetchall()
+    conn.close()
+    return rules
+
+def is_already_imported(mail_id):
+    """Проверяет, было ли письмо с данным mail_id уже импортировано."""
+    conn = get_db_connection()
+    cur = conn.execute("SELECT 1 FROM imported_emails WHERE mail_id = ?", (mail_id,))
+    exists = cur.fetchone() is not None
+    conn.close()
+    return exists
+
+def mark_imported(mail_id, rule_id):
+    """Записывает факт импорта письма."""
+    conn = get_db_connection()
+    conn.execute(
+        "INSERT OR IGNORE INTO imported_emails (mail_id, rule_id, status) VALUES (?, ?, 'imported')",
+        (mail_id, rule_id)
     )
-    return logging.getLogger(__name__)
+    conn.commit()
+    conn.close()
+
+def update_import_status(mail_id, status, error_text=None):
+    """Обновляет статус обработки письма."""
+    conn = get_db_connection()
+    if error_text:
+        conn.execute(
+            "UPDATE imported_emails SET status = ?, error_text = ? WHERE mail_id = ?",
+            (status, error_text, mail_id)
+        )
+    else:
+        conn.execute(
+            "UPDATE imported_emails SET status = ? WHERE mail_id = ?",
+            (status, mail_id)
+        )
+    conn.commit()
+    conn.close()
 
 def main():
     raw_email = sys.stdin.buffer.read()
     if not raw_email:
         sys.exit(0)
 
-    script_dir = Path(__file__).parent.absolute()
-    config_path = get_config_path()
-    config = load_config(config_path)
+    # Настройка логирования (только в файл)
+    config = load_ini_config()
     log_dir = config.get('logging', 'log_dir')
-    logger = setup_logging(log_dir)
-
+    logger = setup_logging('getmail_filter', log_dir)
     logger.info("Получено письмо, начинаем обработку фильтром")
 
     msg = email.message_from_bytes(raw_email, policy=default)
     from_header = msg.get('From', '')
     to_header = msg.get('To', '')
     subject_header = msg.get('Subject', '')
+    message_id = msg.get('Message-ID', '')
 
-    logger.debug(f"From: {from_header}")
-    logger.debug(f"To: {to_header}")
-    logger.debug(f"Subject: {subject_header}")
+    # Если Message-ID нет, генерируем хеш от содержимого
+    if not message_id:
+        message_id = hashlib.md5(raw_email).hexdigest()
+        logger.warning(f"Message-ID отсутствует, сгенерирован хеш: {message_id}")
 
-    try:
-        from_pattern = config.get('getmail_filter', 'from_pattern')
-        to_pattern = config.get('getmail_filter', 'to_pattern')
-        subject_pattern = config.get('getmail_filter', 'subject_pattern')
-        temp_dir = config.get('paths', 'email_temp_dir')
-    except (configparser.NoSectionError, configparser.NoOptionError) as e:
-        logger.error(f"Ошибка чтения конфигурации фильтра: {e}")
+    logger.debug(f"From: {from_header}, To: {to_header}, Subject: {subject_header}, Message-ID: {message_id}")
+
+    # Проверяем, не импортировано ли уже
+    if is_already_imported(message_id):
+        logger.info(f"Письмо с Message-ID {message_id} уже импортировано, пропускаем")
         sys.stdout.buffer.write(raw_email)
         sys.exit(0)
 
-    from_match = from_pattern in from_header
-    to_match = to_pattern in to_header
-    subject_match = subject_pattern in subject_header
+    # Загружаем правила
+    rules = get_rules_from_db()
+    if not rules:
+        logger.info("Нет активных правил фильтрации, письмо пропущено")
+        sys.stdout.buffer.write(raw_email)
+        sys.exit(0)
 
-    logger.info(f"from_match={from_match}, to_match={to_match}, subject_match={subject_match}")
+    matched_rule = None
+    for rule in rules:
+        if (rule['from_pattern'] in from_header and
+            rule['to_pattern'] in to_header and
+            rule['subject_pattern'] in subject_header):
+            matched_rule = rule
+            break
 
-    if from_match and to_match and subject_match:
-        logger.info("Письмо соответствует критериям, начинаем обработку")
+    if not matched_rule:
+        logger.info("Письмо не соответствует ни одному правилу")
+        sys.stdout.buffer.write(raw_email)
+        sys.exit(0)
 
-        os.makedirs(temp_dir, exist_ok=True)
-        timestamp = int(time.time())
-        content_hash = hashlib.md5(raw_email).hexdigest()[:8]
-        filename = f"email_{timestamp}_{content_hash}.eml"
-        filepath = os.path.join(temp_dir, filename)
+    logger.info(f"Письмо соответствует правилу ID={matched_rule['id']}, запускаем парсер {matched_rule['parser_script']}")
 
-        try:
-            with open(filepath, 'wb') as f:
-                f.write(raw_email)
-            logger.info(f"Письмо сохранено во временный файл: {filepath}")
-        except Exception as e:
-            logger.error(f"Не удалось сохранить письмо: {e}")
-            sys.stdout.buffer.write(raw_email)
-            sys.exit(0)
+    # Сохраняем письмо во временную папку
+    temp_dir = config.get('paths', 'email_temp_dir')
+    os.makedirs(temp_dir, exist_ok=True)
+    timestamp = int(time.time())
+    filename = f"email_{timestamp}_{message_id[:8]}.eml"
+    filepath = os.path.join(temp_dir, filename)
+    with open(filepath, 'wb') as f:
+        f.write(raw_email)
+    logger.info(f"Письмо сохранено во временный файл: {filepath}")
 
-        parser_script = script_dir / 'email_parser.py'
-        try:
-            result = subprocess.run(
-                [sys.executable, str(parser_script), filepath],
-                capture_output=True,
-                text=True,
-                timeout=180
-            )
-            if result.returncode == 0:
-                logger.info(f"Парсер успешно обработал {filepath}, удаляем временный файл")
-                os.remove(filepath)
-            else:
-                logger.error(f"Парсер завершился с ошибкой (код {result.returncode}): {result.stderr}")
-                # Оставляем файл для отладки
-        except subprocess.TimeoutExpired:
-            logger.error(f"Парсер превысил время ожидания (180 сек) для {filepath}")
-        except Exception as e:
-            logger.exception(f"Ошибка при запуске парсера: {e}")
-    else:
-        logger.info("Письмо не соответствует критериям фильтрации")
+    # Отмечаем импорт
+    mark_imported(message_id, matched_rule['id'])
+
+    # Запускаем парсер в фоновом режиме (не ждём завершения)
+    parser_script = matched_rule['parser_script']
+    # Если путь относительный, делаем абсолютным относительно корня проекта
+    if not os.path.isabs(parser_script):
+        parser_script = str(Path(__file__).parent / parser_script)
+
+    try:
+        subprocess.Popen(
+            [sys.executable, parser_script, filepath, message_id],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True
+        )
+        logger.info(f"Парсер {parser_script} запущен в фоне для {filepath}")
+    except Exception as e:
+        logger.error(f"Ошибка запуска парсера: {e}")
+        update_import_status(message_id, 'parsing_error', str(e))
 
     sys.stdout.buffer.write(raw_email)
-
-# ===== Функции-обёртки для тестов =====
-
-def should_process_email(from_header):
-    """
-    Проверяет, нужно ли обрабатывать письмо по полю From.
-    Использует логику из конфига или значение по умолчанию.
-    """
-    try:
-        config = load_config(get_config_path())
-        from_pattern = config.get('getmail_filter', 'from_pattern')
-        return from_pattern in from_header
-    except (configparser.NoSectionError, configparser.NoOptionError, Exception):
-        # Если нет конфига, используем значение по умолчанию
-        return 'uslugi@mos.ru' in from_header
 
 if __name__ == '__main__':
     main()

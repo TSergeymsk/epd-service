@@ -1,9 +1,25 @@
 #!/usr/bin/env python3
+"""
+Веб-интерфейс для просмотра данных ЕПД и управления AI-анализом.
+"""
 import sqlite3
 import configparser
 import logging
 import os
+import json
+from pathlib import Path
 from flask import Flask, render_template, request, jsonify
+
+# Загрузка конфигурации
+def get_config_path():
+    env_path = os.environ.get('EPD_CONFIG')
+    if env_path:
+        return env_path
+    return str(Path(__file__).parent / 'config.ini')
+
+config_path = get_config_path()
+config = configparser.ConfigParser()
+config.read(config_path)
 
 def setup_logging(config):
     log_dir = config.get('logging', 'log_dir')
@@ -19,18 +35,12 @@ def setup_logging(config):
     )
     return logging.getLogger(__name__)
 
-logger = logging.getLogger(__name__)
+logger = setup_logging(config)
 
-# Загрузка конфигурации
-config = configparser.ConfigParser()
-config.read('config.ini')
 DB_PATH = config.get('paths', 'db_path')
 PORT = config.getint('frontend', 'port')
 STATIC_DIR = config.get('frontend', 'static_dir', fallback='static')
 DEBUG = config.getboolean('frontend', 'debug', fallback=False)
-
-# Настройка логирования (вызываем после загрузки конфига)
-logger = setup_logging(config)
 
 app = Flask(__name__, static_folder=STATIC_DIR)
 
@@ -39,6 +49,156 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
+# ------------------ Вспомогательные функции ------------------
+def get_period_id(conn, year, month):
+    cur = conn.execute("SELECT id FROM periods WHERE year = ? AND month = ?", (year, month))
+    row = cur.fetchone()
+    return row['id'] if row else None
+
+def get_aggregated_data(conn, address, period_id):
+    """Возвращает агрегированные данные для адреса и периода (аналогично как в orchestrator)"""
+    cur = conn.execute("SELECT id FROM accounts WHERE address = ?", (address,))
+    account_ids = [row['id'] for row in cur.fetchall()]
+    if not account_ids:
+        return [], None, None, {}
+
+    placeholders = ','.join('?' * len(account_ids))
+    # Текущий месяц
+    query = f"""
+        SELECT s.name,
+               SUM(c.amount_due) as total_amount,
+               SUM(c.quantity) as total_quantity
+        FROM charges c
+        JOIN services s ON c.service_id = s.id
+        WHERE c.account_id IN ({placeholders}) AND c.period_id = ?
+        GROUP BY s.name
+        ORDER BY s.name
+    """
+    cur = conn.execute(query, account_ids + [period_id])
+    rows = cur.fetchall()
+    current = []
+    for row in rows:
+        total_q = row['total_quantity'] or 0
+        avg_tariff = row['total_amount'] / total_q if total_q > 0 else 0
+        current.append({
+            'name': row['name'],
+            'quantity': total_q,
+            'tariff': avg_tariff,
+            'amount_due': row['total_amount']
+        })
+    # Предыдущий месяц
+    cur = conn.execute(f"""
+        SELECT p.id, p.year, p.month
+        FROM periods p
+        JOIN charges c ON c.period_id = p.id
+        WHERE c.account_id IN ({placeholders}) AND p.id < ?
+        ORDER BY p.year DESC, p.month DESC
+        LIMIT 1
+    """, account_ids + [period_id])
+    prev_period = cur.fetchone()
+    prev_data = None
+    prev_ym = None
+    if prev_period:
+        cur2 = conn.execute(f"""
+            SELECT s.name,
+                   SUM(c.amount_due) as total_amount,
+                   SUM(c.quantity) as total_quantity
+            FROM charges c
+            JOIN services s ON c.service_id = s.id
+            WHERE c.account_id IN ({placeholders}) AND c.period_id = ?
+            GROUP BY s.name
+        """, account_ids + [prev_period['id']])
+        prev_rows = cur2.fetchall()
+        prev_data = []
+        for row in prev_rows:
+            total_q = row['total_quantity'] or 0
+            avg_tariff = row['total_amount'] / total_q if total_q > 0 else 0
+            prev_data.append({
+                'name': row['name'],
+                'quantity': total_q,
+                'tariff': avg_tariff,
+                'amount_due': row['total_amount']
+            })
+        prev_ym = f"{prev_period['year']}-{prev_period['month']:02d}"
+
+    # Динамика за 12 месяцев
+    last_12_data = {}
+    months_query = f"""
+        SELECT DISTINCT p.year, p.month
+        FROM periods p
+        JOIN charges c ON c.period_id = p.id
+        WHERE c.account_id IN ({placeholders}) AND p.id < ?
+        ORDER BY p.year DESC, p.month DESC
+        LIMIT 12
+    """
+    cur = conn.execute(months_query, account_ids + [period_id])
+    months = cur.fetchall()
+    if months:
+        month_conditions = " OR ".join(["(p.year = ? AND p.month = ?)"] * len(months))
+        month_params = []
+        for m in months:
+            month_params.append(m['year'])
+            month_params.append(m['month'])
+        query_dyn = f"""
+            SELECT p.year, p.month, s.name,
+                   SUM(c.amount_due) as total_amount
+            FROM charges c
+            JOIN periods p ON c.period_id = p.id
+            JOIN services s ON c.service_id = s.id
+            WHERE c.account_id IN ({placeholders})
+              AND ({month_conditions})
+            GROUP BY p.year, p.month, s.name
+            ORDER BY p.year DESC, p.month DESC, s.name
+        """
+        cur = conn.execute(query_dyn, account_ids + month_params)
+        rows = cur.fetchall()
+        for row in rows:
+            ym = f"{row['year']}-{row['month']:02d}"
+            if ym not in last_12_data:
+                last_12_data[ym] = {}
+            last_12_data[ym][row['name']] = row['total_amount']
+
+    return current, prev_data, prev_ym, last_12_data
+
+def generate_telegram_message(conn, address, period_id):
+    """Генерирует текст сообщения для Telegram (используется в эндпоинте retry_telegram)"""
+    # Получаем успешный LLM-ответ
+    cur = conn.execute("""
+        SELECT response_text, model
+        FROM llm_requests
+        WHERE address = ? AND period_id = ? AND status = 'success'
+        ORDER BY updated_at DESC
+        LIMIT 1
+    """, (address, period_id))
+    llm_row = cur.fetchone()
+    ai_response = llm_row['response_text'] if llm_row else None
+
+    current, _, _, _ = get_aggregated_data(conn, address, period_id)
+    total = sum(item['amount_due'] for item in current) if current else 0
+
+    cur = conn.execute("SELECT year, month FROM periods WHERE id = ?", (period_id,))
+    period = cur.fetchone()
+    period_str = f"{period['year']}-{period['month']:02d}"
+
+    lines = []
+    lines.append("<b>Анализ ЕПД</b>")
+    lines.append(f"🏠 <b>Адрес:</b> {address}")
+    lines.append(f"📅 <b>Период:</b> {period_str}")
+    lines.append("")
+    lines.append(f"💰 <b>Итого: {total:,.2f} руб.</b>")
+    if current:
+        lines.append("В т.ч.:")
+        for item in sorted(current, key=lambda x: x['amount_due'], reverse=True):
+            lines.append(f"🔹 <b>{item['name']}:</b> {item['amount_due']:,.2f} руб. (кол-во: {item['quantity']:.3f})")
+    lines.append("")
+    if ai_response:
+        lines.append("<b>Анализ:</b>")
+        lines.append(ai_response)
+    else:
+        lines.append("<i>Анализ не проведён</i>")
+    return "\n".join(lines)
+
+# ------------------ Маршруты ------------------
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -107,7 +267,6 @@ def data():
 
     conn = get_db()
 
-    # Получаем ID периодов в заданном диапазоне
     cur = conn.execute("""
         SELECT id, year, month
         FROM periods
@@ -202,11 +361,11 @@ def analysis_for_month():
 
     conn = get_db()
     cur = conn.execute("""
-        SELECT a.response, a.model, a.created_at
-        FROM address_analysis a
+        SELECT a.response_text as response, a.model, a.updated_at as created_at
+        FROM llm_requests a
         JOIN periods p ON a.period_id = p.id
-        WHERE a.address = ? AND p.year = ? AND p.month = ?
-        ORDER BY a.created_at DESC
+        WHERE a.address = ? AND p.year = ? AND p.month = ? AND a.status = 'success'
+        ORDER BY a.updated_at DESC
         LIMIT 1
     """, (address, year, month))
     row = cur.fetchone()
@@ -220,5 +379,138 @@ def analysis_for_month():
     else:
         return jsonify({"error": "No analysis found"}), 404
 
+# ------------------ НОВЫЕ ЭНДПОИНТЫ ------------------
+@app.route('/api/llm_details')
+def llm_details():
+    address = request.args.get('address')
+    year = request.args.get('year', type=int)
+    month = request.args.get('month', type=int)
+    if not address or not year or not month:
+        return jsonify({"error": "Missing parameters"}), 400
+
+    conn = get_db()
+    period_id = get_period_id(conn, year, month)
+    if not period_id:
+        conn.close()
+        return jsonify({"error": "Period not found"}), 404
+
+    cur = conn.execute("""
+        SELECT id, model, provider, temperature, max_tokens, prompt_template,
+               request_payload, response_text, tokens_used, status, attempts, last_error,
+               created_at, updated_at
+        FROM llm_requests
+        WHERE address = ? AND period_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+    """, (address, period_id))
+    row = cur.fetchone()
+    conn.close()
+    if row:
+        return jsonify({
+            "id": row['id'],
+            "model": row['model'],
+            "provider": row['provider'],
+            "temperature": row['temperature'],
+            "max_tokens": row['max_tokens'],
+            "prompt_template": row['prompt_template'],
+            "request_payload": row['request_payload'],
+            "response_text": row['response_text'],
+            "tokens_used": row['tokens_used'],
+            "status": row['status'],
+            "attempts": row['attempts'],
+            "last_error": row['last_error'],
+            "created_at": row['updated_at']  # показываем время последнего обновления
+        })
+    else:
+        return jsonify({"error": "No LLM request found"}), 404
+
+@app.route('/api/retry_ai', methods=['POST'])
+def retry_ai():
+    data = request.get_json()
+    address = data.get('address')
+    year = data.get('year')
+    month = data.get('month')
+    if not address or not year or not month:
+        return jsonify({"error": "Missing parameters"}), 400
+
+    conn = get_db()
+    period_id = get_period_id(conn, year, month)
+    if not period_id:
+        conn.close()
+        return jsonify({"error": "Period not found"}), 404
+
+    # Проверяем, есть ли уже запись для этого периода
+    cur = conn.execute("""
+        SELECT id FROM llm_requests
+        WHERE address = ? AND period_id = ?
+        ORDER BY created_at DESC LIMIT 1
+    """, (address, period_id))
+    existing = cur.fetchone()
+    if existing:
+        # Сбрасываем статус
+        conn.execute("""
+            UPDATE llm_requests
+            SET status = 'pending', attempts = 0, last_error = NULL, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (existing['id'],))
+    else:
+        # Создаём новую запись (заполним позже в оркестраторе)
+        conn.execute("""
+            INSERT INTO llm_requests (address, period_id, model, status)
+            VALUES (?, ?, ?, 'pending')
+        """, (address, period_id, 'unknown'))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok"})
+
+@app.route('/api/retry_telegram', methods=['POST'])
+def retry_telegram():
+    data = request.get_json()
+    address = data.get('address')
+    year = data.get('year')
+    month = data.get('month')
+    if not address or not year or not month:
+        return jsonify({"error": "Missing parameters"}), 400
+
+    conn = get_db()
+    period_id = get_period_id(conn, year, month)
+    if not period_id:
+        conn.close()
+        return jsonify({"error": "Period not found"}), 404
+
+    # Проверяем, есть ли успешный LLM-ответ
+    cur = conn.execute("""
+        SELECT id FROM llm_requests
+        WHERE address = ? AND period_id = ? AND status = 'success'
+    """, (address, period_id))
+    if not cur.fetchone():
+        conn.close()
+        return jsonify({"error": "No successful LLM response for this period"}), 400
+
+    # Проверяем, есть ли уже сообщение
+    cur = conn.execute("""
+        SELECT id FROM telegram_messages
+        WHERE address = ? AND period_id = ?
+        ORDER BY created_at DESC LIMIT 1
+    """, (address, period_id))
+    existing = cur.fetchone()
+    if existing:
+        conn.execute("""
+            UPDATE telegram_messages
+            SET status = 'pending', attempts = 0, last_error = NULL, sent_at = NULL
+            WHERE id = ?
+        """, (existing['id'],))
+    else:
+        # Генерируем текст сообщения
+        msg_text = generate_telegram_message(conn, address, period_id)
+        conn.execute("""
+            INSERT INTO telegram_messages (address, period_id, message_text, status)
+            VALUES (?, ?, ?, 'pending')
+        """, (address, period_id, msg_text))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok"})
+
+# ------------------ Запуск ------------------
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=PORT, debug=DEBUG)

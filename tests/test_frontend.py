@@ -1,58 +1,89 @@
-import json
-import sqlite3
+"""Тесты для frontend API."""
 import pytest
+import json
+from flask import Flask
+from frontend import app
+from unittest.mock import patch
+
+@pytest.fixture
+def client():
+    app.config['TESTING'] = True
+    with app.test_client() as client:
+        yield client
 
 def test_index(client):
-    response = client.get('/')
-    assert response.status_code == 200
+    rv = client.get('/')
+    assert rv.status_code == 200
+    assert b'Анализ ЕПД' in rv.data
 
-@pytest.mark.xfail(reason="Таблица accounts не имеет колонок month и year")
-def test_get_addresses(client, temp_db):
-    conn = sqlite3.connect(temp_db)
-    conn.execute("INSERT INTO accounts (address, account_number, month, year) VALUES (?,?,?,?)",
-                 ("addr1", "acc1", "январь", 2025))
-    conn.execute("INSERT INTO accounts (address, account_number, month, year) VALUES (?,?,?,?)",
-                 ("addr2", "acc2", "февраль", 2025))
-    conn.commit()
-    conn.close()
-    response = client.get('/api/addresses')
-    assert response.status_code == 200
-    data = json.loads(response.data)
-    assert "addr1" in data
-    assert "addr2" in data
+def test_api_addresses_empty(client):
+    with patch('frontend.get_db') as mock_db:
+        mock_conn = mock_db.return_value
+        mock_conn.execute.return_value.fetchall.return_value = []
+        rv = client.get('/api/addresses')
+        assert rv.status_code == 200
+        assert rv.json == []
 
-@pytest.mark.xfail(reason="Таблица accounts не имеет колонок month и year")
-def test_get_periods(client, temp_db):
-    conn = sqlite3.connect(temp_db)
-    conn.execute("INSERT INTO accounts (address, account_number, month, year) VALUES (?,?,?,?)",
-                 ("addr1", "acc1", "январь", 2025))
-    conn.execute("INSERT INTO accounts (address, account_number, month, year) VALUES (?,?,?,?)",
-                 ("addr1", "acc2", "февраль", 2025))
-    conn.commit()
-    conn.close()
-    response = client.get('/api/periods?address=addr1')
-    assert response.status_code == 200
-    data = json.loads(response.data)
-    assert len(data) == 2
+def test_api_accounts_by_address(client):
+    with patch('frontend.get_db') as mock_db:
+        mock_conn = mock_db.return_value
+        mock_conn.execute.return_value.fetchall.return_value = [
+            {'id': 1, 'account_number': '123'}
+        ]
+        rv = client.get('/api/accounts_by_address?address=test')
+        assert rv.status_code == 200
+        assert rv.json == [{'id': 1, 'account_number': '123'}]
 
-@pytest.mark.xfail(reason="Таблица accounts не имеет колонок month и year, и charges не имеет service_name")
-def test_get_charges(client, temp_db):
-    conn = sqlite3.connect(temp_db)
-    cur = conn.cursor()
-    cur.execute("INSERT INTO accounts (address, account_number, month, year) VALUES (?,?,?,?)",
-                ("addr1", "acc1", "январь", 2025))
-    account_id = cur.lastrowid
-    cur.execute("INSERT INTO charges (account_id, service_name, charge) VALUES (?,?,?)",
-                (account_id, "ХВС", 150.0))
-    cur.execute("INSERT INTO charges (account_id, service_name, charge) VALUES (?,?,?)",
-                (account_id, "ГВС", 200.0))
-    conn.commit()
-    conn.close()
-    response = client.get('/api/charges?address=addr1&month=январь&year=2025')
-    assert response.status_code == 200
-    data = json.loads(response.data)
-    assert "charges" in data
-    assert len(data["charges"]) == 2
-    services = [item["service_name"] for item in data["charges"]]
-    assert "ХВС" in services
-    assert "ГВС" in services
+def test_api_services(client):
+    with patch('frontend.get_db') as mock_db:
+        mock_conn = mock_db.return_value
+        mock_conn.execute.return_value.fetchall.return_value = [
+            {'id': 1, 'name': 'Service1', 'unit': 'ед'}
+        ]
+        rv = client.get('/api/services')
+        assert rv.status_code == 200
+        assert rv.json == [{'id': 1, 'name': 'Service1', 'unit': 'ед'}]
+
+def test_api_periods(client):
+    with patch('frontend.get_db') as mock_db:
+        mock_conn = mock_db.return_value
+        mock_conn.execute.return_value.fetchall.return_value = [
+            {'year': 2024, 'month': 1}
+        ]
+        rv = client.get('/api/periods?account_ids=1')
+        assert rv.status_code == 200
+        assert rv.json == [{'year': 2024, 'month': 1}]
+
+def test_api_data_missing_params(client):
+    rv = client.get('/api/data')
+    assert rv.status_code == 400
+    assert 'Missing parameters' in rv.json['error']
+
+def test_api_analysis_for_month_not_found(client):
+    with patch('frontend.get_db') as mock_db:
+        mock_conn = mock_db.return_value
+        mock_conn.execute.return_value.fetchone.return_value = None
+        rv = client.get('/api/analysis_for_month?address=test&year=2024&month=1')
+        assert rv.status_code == 404
+        assert rv.json['error'] == 'No analysis found'
+
+def test_api_llm_details_not_found(client):
+    with patch('frontend.get_db') as mock_db:
+        mock_conn = mock_db.return_value
+        # period_id не найден
+        mock_conn.execute.return_value.fetchone.return_value = None
+        rv = client.get('/api/llm_details?address=test&year=2024&month=1')
+        assert rv.status_code == 404
+        assert rv.json['error'] == 'Period not found'
+
+def test_api_retry_ai(client):
+    with patch('frontend.get_db') as mock_db:
+        mock_conn = mock_db.return_value
+        # Имитируем существующий период и запись
+        mock_conn.execute.return_value.fetchone.side_effect = [
+            {'id': 1},  # период
+            {'id': 10}  # существующий llm_requests
+        ]
+        rv = client.post('/api/retry_ai', json={'address': 'test', 'year': 2024, 'month': 1})
+        assert rv.status_code == 200
+        assert rv.json['status'] == 'ok'

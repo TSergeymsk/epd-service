@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Инициализация базы данных для системы учёта платежей ЖКХ (ЕПД).
-Создаёт таблицы, индексы и включает режим WAL.
+Инициализация и миграция базы данных.
+Создаёт недостающие таблицы и индексы, не удаляя существующие данные.
 """
 import sqlite3
 import os
@@ -15,13 +15,85 @@ def get_config_path():
         return env_path
     return str(Path(__file__).parent / 'config.ini')
 
-config = configparser.ConfigParser()
-config.read(get_config_path())
-DB_PATH = config.get('paths', 'db_path')
+def get_db_path():
+    config = configparser.ConfigParser()
+    config.read(get_config_path())
+    return config.get('paths', 'db_path')
 
-# Определение схемы базы данных (SQL) - без изменений
-SCHEMA = """
--- Таблица лицевых счетов
+# Схема с новыми таблицами (добавляем только отсутствующие)
+NEW_TABLES = """
+-- Таблица правил фильтрации для getmail
+CREATE TABLE IF NOT EXISTS filter_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    from_pattern TEXT NOT NULL,
+    to_pattern TEXT NOT NULL,
+    subject_pattern TEXT NOT NULL,
+    parser_script TEXT NOT NULL,
+    enabled BOOLEAN DEFAULT 1,
+    priority INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Журнал импортированных писем (для исключения дублирования)
+CREATE TABLE IF NOT EXISTS imported_emails (
+    mail_id TEXT PRIMARY KEY,
+    rule_id INTEGER,
+    imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status TEXT DEFAULT 'imported',
+    parsed_at TIMESTAMP,
+    error_text TEXT,
+    FOREIGN KEY (rule_id) REFERENCES filter_rules(id)
+);
+
+-- Запросы к LLM (анализ)
+CREATE TABLE IF NOT EXISTS llm_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    address TEXT NOT NULL,
+    period_id INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    provider TEXT,
+    temperature REAL DEFAULT 0.7,
+    max_tokens INTEGER DEFAULT 2000,
+    prompt_template TEXT,
+    request_payload TEXT,
+    response_text TEXT,
+    tokens_used INTEGER,
+    status TEXT DEFAULT 'pending',   -- pending, processing, success, failed, retry_limit
+    attempts INTEGER DEFAULT 0,
+    last_error TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (period_id) REFERENCES periods(id)
+);
+
+-- Сообщения для Telegram
+CREATE TABLE IF NOT EXISTS telegram_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    address TEXT NOT NULL,
+    period_id INTEGER NOT NULL,
+    message_text TEXT NOT NULL,
+    parse_mode TEXT DEFAULT 'HTML',
+    sent_at TIMESTAMP,
+    status TEXT DEFAULT 'pending',   -- pending, sent, failed
+    attempts INTEGER DEFAULT 0,
+    last_error TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (period_id) REFERENCES periods(id)
+);
+"""
+
+# Индексы для новых таблиц
+NEW_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_llm_requests_address_period ON llm_requests(address, period_id);
+CREATE INDEX IF NOT EXISTS idx_llm_requests_status ON llm_requests(status);
+CREATE INDEX IF NOT EXISTS idx_telegram_messages_status ON telegram_messages(status);
+CREATE INDEX IF NOT EXISTS idx_telegram_messages_period ON telegram_messages(period_id);
+CREATE INDEX IF NOT EXISTS idx_imported_emails_status ON imported_emails(status);
+"""
+
+# Существующие таблицы (проверяем, что они есть)
+BASE_TABLES = """
 CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_number TEXT NOT NULL UNIQUE,
@@ -30,7 +102,6 @@ CREATE TABLE IF NOT EXISTS accounts (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Таблица периодов (месяц/год)
 CREATE TABLE IF NOT EXISTS periods (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     year INTEGER NOT NULL,
@@ -39,7 +110,6 @@ CREATE TABLE IF NOT EXISTS periods (
     UNIQUE(year, month)
 );
 
--- Справочник услуг
 CREATE TABLE IF NOT EXISTS services (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
@@ -47,7 +117,6 @@ CREATE TABLE IF NOT EXISTS services (
     code TEXT
 );
 
--- Основные начисления
 CREATE TABLE IF NOT EXISTS charges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
@@ -66,7 +135,6 @@ CREATE TABLE IF NOT EXISTS charges (
     UNIQUE(account_id, period_id, service_id)
 );
 
--- Дополнительная информация по счёту за период
 CREATE TABLE IF NOT EXISTS account_period_info (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
@@ -83,7 +151,6 @@ CREATE TABLE IF NOT EXISTS account_period_info (
     UNIQUE(account_id, period_id)
 );
 
--- Сырые данные импорта
 CREATE TABLE IF NOT EXISTS raw_imports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_type TEXT NOT NULL,
@@ -93,71 +160,57 @@ CREATE TABLE IF NOT EXISTS raw_imports (
     account_id INTEGER,
     FOREIGN KEY (account_id) REFERENCES accounts(id)
 );
-
--- Анализ ИИ по адресам
-CREATE TABLE IF NOT EXISTS address_analysis (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    address TEXT NOT NULL,
-    period_id INTEGER NOT NULL,
-    prompt TEXT NOT NULL,
-    response TEXT NOT NULL,
-    model TEXT NOT NULL,
-    tokens_used INTEGER,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (period_id) REFERENCES periods(id),
-    UNIQUE(address, period_id)
-);
 """
 
-INDEXES = """
-CREATE INDEX IF NOT EXISTS idx_charges_account_period ON charges(account_id, period_id);
-CREATE INDEX IF NOT EXISTS idx_charges_service ON charges(service_id);
-CREATE INDEX IF NOT EXISTS idx_account_period_info_account ON account_period_info(account_id);
-CREATE INDEX IF NOT EXISTS idx_account_period_info_period ON account_period_info(period_id);
-CREATE INDEX IF NOT EXISTS idx_raw_imports_account ON raw_imports(account_id);
-CREATE INDEX IF NOT EXISTS idx_raw_imports_date ON raw_imports(processed_at);
-CREATE INDEX IF NOT EXISTS idx_address_analysis_address ON address_analysis(address);
-CREATE INDEX IF NOT EXISTS idx_address_analysis_period ON address_analysis(period_id);
-"""
-
-def init_database(db_path=None):
-    """
-    Инициализирует базу данных по указанному пути.
-    Если путь не передан, используется DB_PATH из конфига.
-    """
-    if db_path is None:
-        db_path = DB_PATH
+def init_db():
+    db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
+    
+    # Включаем WAL и таймаут
     cursor.execute("PRAGMA journal_mode = WAL;")
     cursor.execute("PRAGMA busy_timeout = 5000;")
-    cursor.executescript(SCHEMA)
-    cursor.executescript(INDEXES)
+    
+    # Создаём базовые таблицы (если их нет)
+    cursor.executescript(BASE_TABLES)
+    
+    # Создаём новые таблицы
+    cursor.executescript(NEW_TABLES)
+    cursor.executescript(NEW_INDEXES)
+    
+    # Добавляем индексы для существующих таблиц (если их нет)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_charges_account_period ON charges(account_id, period_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_charges_service ON charges(service_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_period_info_account ON account_period_info(account_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_period_info_period ON account_period_info(period_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_raw_imports_account ON raw_imports(account_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_raw_imports_date ON raw_imports(processed_at);")
+    
     conn.commit()
     conn.close()
-    print(f"База данных успешно инициализирована: {db_path}")
-    print("Режим WAL включён, таймаут ожидания установлен в 5000 мс.")
+    print(f"База данных инициализирована/обновлена: {db_path}")
+    print("Все таблицы и индексы созданы (если отсутствовали).")
 
-def check_db():
-    if not os.path.exists(DB_PATH):
-        return False
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='accounts';")
-        result = cursor.fetchone()
-        conn.close()
-        return result is not None
-    except sqlite3.Error:
-        return False
+def check_and_migrate():
+    db_path = get_db_path()
+    if not os.path.exists(db_path):
+        print("База данных не существует. Будет создана новая.")
+        init_db()
+        return
+    
+    # Проверяем наличие ключевых таблиц
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='filter_rules';")
+    if not cursor.fetchone():
+        print("Обнаружена старая БД. Выполняется миграция (добавление новых таблиц).")
+        cursor.executescript(NEW_TABLES)
+        cursor.executescript(NEW_INDEXES)
+        conn.commit()
+        print("Миграция выполнена.")
+    conn.close()
 
 if __name__ == "__main__":
-    if check_db():
-        print(f"База данных {DB_PATH} уже существует и содержит таблицы.")
-        response = input("Пересоздать базу? Все данные будут потеряны! (y/N): ").strip().lower()
-        if response != 'y':
-            print("Операция отменена.")
-            sys.exit(0)
-        os.remove(DB_PATH)
-        print("Старая база удалена.")
-    init_database()  # вызов без аргументов использует DB_PATH
+    check_and_migrate()
+    # Если нужно принудительно создать всё заново (с потерей данных) – раскомментировать
+    # init_db()
