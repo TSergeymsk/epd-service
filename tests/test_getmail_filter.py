@@ -1,15 +1,10 @@
 """Тесты для getmail_filter (фильтрация писем)."""
 import pytest
-import sys
-from pathlib import Path
 from unittest.mock import patch, MagicMock
-import email
-from email.policy import default
 import getmail_filter
 
 def test_get_rules_from_db(temp_db):
     conn, path = temp_db
-    # Вставляем правило
     conn.execute("""
         INSERT INTO filter_rules (id, from_pattern, to_pattern, subject_pattern, parser_script, enabled)
         VALUES (1, 'test@example.com', 'me@example.com', 'Test', 'parser.py', 1)
@@ -42,7 +37,9 @@ def test_main_no_match():
     with patch('sys.stdin.buffer.read', return_value=raw_email), \
          patch('sys.stdout.buffer.write') as mock_write, \
          patch('getmail_filter.load_ini_config') as mock_config, \
-         patch('getmail_filter.get_rules_from_db', return_value=[]):
+         patch('getmail_filter.get_rules_from_db', return_value=[]), \
+         patch('getmail_filter.get_db_connection') as mock_db_conn:
+        mock_db_conn.return_value = MagicMock()
         getmail_filter.main()
         mock_write.assert_called_once_with(raw_email)
 
@@ -55,7 +52,9 @@ def test_main_matches_and_spawns():
          patch('getmail_filter.mark_imported') as mock_mark, \
          patch('subprocess.Popen') as mock_popen, \
          patch('time.time', return_value=12345), \
-         patch('hashlib.md5') as mock_md5:
+         patch('hashlib.md5') as mock_md5, \
+         patch('getmail_filter.get_db_connection') as mock_db_conn:
+        mock_db_conn.return_value = MagicMock()
         mock_md5.return_value.hexdigest.return_value = 'abcd1234'
         mock_rules.return_value = [
             {'id': 1, 'from_pattern': 'test@example.com', 'to_pattern': 'me@example.com',

@@ -34,7 +34,6 @@ def setup_logger():
     from utils import setup_logging
     logger = setup_logging('orchestrator')
 
-# --- Остальные функции (без изменений) ---
 def clean_markdown(text):
     if not text:
         return text
@@ -45,7 +44,7 @@ def clean_markdown(text):
     text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
     text = re.sub(r'`(.*?)`', r'\1', text)
     text = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', text)
-    text = re.sub(r'^(\s*[-*_]{3,}\s*)$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'[-*_]{3,}', '', text)  # удаляем ---
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
@@ -529,7 +528,7 @@ def create_telegram_messages_for_successful_llm(conn):
 
 def main():
     global logger
-    setup_logger()  # инициализируем глобальный logger
+    setup_logger()
     conn = get_db_connection()
     try:
         create_telegram_messages_for_successful_llm(conn)

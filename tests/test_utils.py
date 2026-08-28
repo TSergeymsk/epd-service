@@ -1,9 +1,7 @@
 """Тесты для модуля utils."""
 import pytest
-import os
-import tempfile
 from pathlib import Path
-from unittest.mock import patch, mock_open
+from unittest.mock import patch
 from utils import load_ini_config, load_ai_config, get_db_path, get_db_connection, setup_logging
 
 def test_load_ini_config_success(tmp_path):
@@ -26,16 +24,20 @@ def test_load_ini_config_fallback():
     with patch('utils.get_config_path', return_value='/nonexistent.ini'):
         config = load_ini_config()
         assert config is not None
-        assert config.has_section('paths') is False  # или пустой
+        assert config.has_section('paths') is False
 
 def test_load_ai_config_missing(tmp_path):
     with patch('utils.get_project_root', return_value=tmp_path):
         ai_config = load_ai_config()
-        assert ai_config == {}  # если файла нет, возвращаем пустой словарь
+        assert ai_config == {}
 
 def test_get_db_path():
-    with patch('utils.load_ini_config') as mock_load:
-        mock_load.return_value = {'paths': {'db_path': '/test/db.sqlite'}}
+    class MockConfig:
+        def get(self, section, key):
+            if section == 'paths' and key == 'db_path':
+                return '/test/db.sqlite'
+            return None
+    with patch('utils.load_ini_config', return_value=MockConfig()):
         assert get_db_path() == '/test/db.sqlite'
 
 def test_get_db_connection():
