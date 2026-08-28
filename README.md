@@ -1,44 +1,49 @@
-# EPD Analyzer
+```markdown
+# EPD System – Анализ Единых Платежных Документов (ЖКХ) с AI
 
-Система автоматического сбора, анализа и визуализации данных Единого платежного документа (ЕПД) за жилищно-коммунальные услуги.
+Система автоматического сбора, парсинга, анализа и визуализации данных из Единых Платежных Документов (ЕПД) ЖКХ с использованием AI-ассистента (через OpenAI-совместимый API). Результаты анализа отправляются в Telegram и отображаются в веб-интерфейсе.
 
-## Возможности
+## 🚀 Возможности
 
-- Автоматический парсинг входящих писем с ЕПД от портала mos.ru (через `getmail` + фильтр)
-- Извлечение структурированных данных: лицевой счёт, адрес, период, перечень услуг, объёмы потребления, тарифы, суммы
-- Сохранение истории начислений в базе данных SQLite
-- Анализ с помощью AI (OpenRouter, Ollama, Groq и другие OpenAI-совместимые API) — сравнение с предыдущим месяцем, динамика за 12 месяцев, структура расходов
-- Отправка отчёта в Telegram после обработки каждого письма
-- Веб-интерфейс для просмотра и анализа данных: графики, детализация, выбор периода и услуг, переключение месяца
-- Адаптивная вёрстка для мобильных устройств
+- **Фильтрация писем** – через `getmail` по правилам из БД (отправитель, получатель, тема).
+- **Парсинг ЕПД** – извлечение данных из HTML/текста писем (поддерживается формат mos.ru).
+- **Хранение** – SQLite с полной историей начислений по месяцам, услугам и лицевым счетам.
+- **AI-анализ** – автоматический запрос к LLM (OpenRouter, Groq, Ollama) для формирования аналитического отчёта.
+- **Telegram-уведомления** – отправка красиво оформленных отчётов в мессенджер.
+- **Веб-интерфейс** – просмотр динамики платежей, детализация по услугам, управление AI-запросами.
+- **Оркестратор** – фоновый процесс для обработки AI-запросов и отправки сообщений с повторными попытками.
+- **CI/CD** – готовые тесты и GitHub Actions.
 
-## Архитектура
+## 🧱 Архитектура
 
-Проект состоит из следующих компонентов:
+| Компонент | Описание |
+|-----------|----------|
+| `getmail_filter.py` | Фильтр для `getmail`, проверяет письма по правилам из БД и запускает парсер. |
+| `parsers/mos_parser.py` | Парсер для писем от mos.ru (HTML/текст). |
+| `parsers/base_parser.py` | Общие функции для всех парсеров (работа с БД, нормализация услуг). |
+| `orchestrator.py` | Оркестратор: обрабатывает AI-запросы (статус `pending`) и отправляет Telegram-сообщения. |
+| `frontend.py` | Веб-интерфейс на Flask. |
+| `utils.py` | Общие утилиты (загрузка конфигов, логирование, подключение к БД). |
+| `init_db.py` | Инициализация и миграция БД. |
+| `tests/` | Модульные тесты для всех компонентов. |
 
-1. **Парсер email (`email_parser.py`)** — извлекает данные из HTML/plain-text писем, нормализует названия услуг, сохраняет в БД, инициирует AI-анализ и отправляет уведомление в Telegram.
-2. **Анализатор AI (`ai_analyzer.py`)** — собирает агрегированные данные по адресу за месяц и за предыдущие периоды, формирует промпт и вызывает внешний AI API (OpenRouter / Ollama / Groq). Результат сохраняется в БД.
-3. **Веб-интерфейс (`frontend.py` + шаблоны)** — Flask-приложение с графиками Chart.js и таблицей детализации. Позволяет выбирать адрес, лицевые счета, период, услуги, просматривать анализ AI.
-4. **Фильтр для getmail (`getmail_filter.py`)** — скрипт, вызываемый getmail для каждого письма. Проверяет отправителя, получателя и тему, копирует подходящие письма во временный каталог и запускает `email_parser.py`.
-5. **База данных SQLite** — хранит счета, периоды, услуги, начисления, дополнительную информацию по периодам, результаты анализов.
+## 📋 Требования
 
-## Требования
+- Python 3.9+
+- SQLite3
+- getmail (для приёма почты)
+- Telegram бот (токен)
+- API-ключ для AI-провайдера (OpenRouter, Groq, Ollama)
 
-- Python 3.8+
-- Установленные пакеты (см. `requirements.txt`)
-- Доступ к API OpenRouter / Ollama / Groq (опционально)
-- Telegram-бот для уведомлений
-- `getmail` для получения почты
-
-## Установка
+## ⚙️ Установка
 
 1. Клонируйте репозиторий:
    ```bash
-   git clone https://github.com/TSergeymsk/epd-service.git
-   cd epd-analyzer
+   git clone https://github.com/yourusername/epd-system.git
+   cd epd-system
    ```
 
-2. Создайте виртуальное окружение и активируйте его:
+2. Создайте и активируйте виртуальное окружение:
    ```bash
    python3 -m venv venv
    source venv/bin/activate
@@ -49,174 +54,153 @@
    pip install -r requirements.txt
    ```
 
-4. Скопируйте пример конфигурации и отредактируйте:
-   ```bash
-   cp config.ini.example config.ini
-   nano config.ini
-   ```
-   Заполните все необходимые параметры (токены, пути, шаблоны фильтрации).
+4. Создайте конфигурационные файлы:
+
+   - **`config.ini`** – скопируйте из примера:
+     ```ini
+     [paths]
+     db_path = /path/to/epd.db
+     email_temp_dir = /tmp/
+     lock_file = /tmp/epd.lock
+
+     [frontend]
+     port = 5000
+     static_dir = static
+     debug = false
+
+     [openrouter]
+     api_key = gsk_...          # ваш API-ключ
+
+     [telegram]
+     bot_token = <токен бота>
+     chat_id = <id чата>
+
+     [logging]
+     log_dir = /var/log/epd/
+     ```
+
+   - **`ai_config.yaml`** – настройки AI и промты:
+     ```yaml
+     ai:
+       provider: groq
+       model: openai/gpt-oss-20b
+       url: https://api.groq.com/openai/v1/chat/completions
+       timeout: 120
+       temperature: 0.7
+       max_tokens: 2000
+
+     prompts:
+       analysis: |
+         (ваш шаблон промта)
+     ```
 
 5. Инициализируйте базу данных:
    ```bash
    python3 init_db.py
    ```
 
-## Конфигурация
+6. Настройте правила фильтрации (один раз):
+   Добавьте правила в таблицу `filter_rules` вручную.
 
-Файл `config.ini` содержит следующие секции:
+## 🔧 Настройка getmail
 
-```ini
-[paths]
-db_path = /путь/к/epd.db
-lock_file = /tmp/epd.lock
-email_temp_dir = /путь/к/временной/папке/для/писем   # сюда фильтр сохраняет письма перед обработкой
-
-[frontend]
-port = 5000
-static_dir = static
-debug = false
-
-[openrouter]
-api_key = ваш_ключ_или_local_ollama
-model = название_модели (например, glm-4.7-flash:latest)
-url = http://localhost:11434/v1/chat/completions   # или https://openrouter.ai/api/v1/chat/completions
-timeout = 180
-
-[telegram]
-bot_token = токен_вашего_бота
-chat_id = ваш_chat_id
-
-[logging]
-log_dir = /путь/к/папке/с/логами
-
-[getmail_filter]
-from_pattern = uslugi@mos.ru
-to_pattern = ваш_email@example.com
-subject_pattern = Единый платежный документ
-```
-
-## Запуск компонентов
-
-### Веб-интерфейс (вручную)
-```bash
-python3 frontend.py
-```
-Сервер будет доступен по адресу `http://localhost:5000`.
-
-Для автозапуска через systemd (пользовательский сервис) см. раздел **Systemd**.
-
-### Обработка писем через getmail
-
-Настройте `getmail` так, чтобы каждое письмо передавалось в фильтр. Пример конфигурации `~/.getmail/getmailrc`:
+Пример конфигурации `~/.getmail/getmailrc`:
 
 ```ini
 [retriever]
-type = SimplePOP3Retriever
-server = pop.gmail.com
-username = ваш_email@example.com
-password = пароль
+type = SimpleIMAPSSLRetriever
+server = imap.gmail.com
+username = your_email@gmail.com
+password = your_app_password
 
 [destination]
-type = Maildir
-path = ~/Maildir/
+type = MDA_external
+path = /path/to/epd-system/getmail_filter.py
+arguments = ("--stdout",)
 
-[filter]
-type = Filter_command
-command = /путь/к/epd-analyzer/getmail_filter.py
+[options]
+verbose = 0
+read_all = false
+delete = false
 ```
 
-Убедитесь, что скрипт `getmail_filter.py` исполняемый:
+## 🏃 Запуск
+
+### Оркестратор (AI + Telegram)
+Запускается периодически (например, через cron каждые 5 минут):
 ```bash
-chmod +x /путь/к/epd-analyzer/getmail_filter.py
+cd /path/to/epd-system
+python3 orchestrator.py
 ```
 
-После этого каждое новое письмо будет проверяться на соответствие шаблонам из `[getmail_filter]`. Подходящие письма сохраняются во временную папку (`email_temp_dir`), обрабатываются парсером, а затем временный файл удаляется (в случае успеха).
-
-### Анализ AI (ручной запуск)
+### Веб-интерфейс
 ```bash
-python3 ai_analyzer.py --limit 5   # обработать 5 самых новых месяцев без анализа
-python3 ai_analyzer.py              # обработать все недостающие
+python3 frontend.py
 ```
-Обычно запуск происходит автоматически из `email_parser.py` после каждого нового письма, поэтому ручной запуск требуется только для первичного заполнения.
+По умолчанию доступен по адресу `http://localhost:5000`.
 
-## Структура проекта
+## 📊 Использование
 
-```
-epd-analyzer/
-├── ai_analyzer.py          # модуль AI-анализа
-├── config.ini.example       # пример конфигурации
-├── email_parser.py          # основной парсер писем
-├── frontend.py              # веб-сервер Flask
-├── getmail_filter.py        # фильтр для getmail
-├── init_db.py               # инициализация БД
-├── requirements.txt         # зависимости
-├── templates/               # HTML-шаблоны Flask
-│   └── index.html           # главная страница
-└── README.md                # этот файл
-```
+1. **Получение писем** – getmail автоматически передаёт письма в `getmail_filter.py`.
+2. **Парсинг** – письма, соответствующие правилам, сохраняются во временную папку и обрабатываются `mos_parser.py`.
+3. **AI-анализ** – оркестратор находит необработанные периоды, формирует промт, отправляет запрос к LLM и сохраняет результат.
+4. **Telegram** – после успешного AI-анализа создаётся сообщение и отправляется (с повторными попытками при ошибках).
+5. **Веб-интерфейс** – позволяет просматривать историю, графики, детали AI-запросов, повторно запускать AI или отправку в Telegram.
 
-## Systemd (автозапуск фронтенда)
+## 🧪 Тестирование
 
-Создайте пользовательский юнит `~/.config/systemd/user/epd-frontend.service`:
-
-```ini
-[Unit]
-Description=EPD Frontend
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/путь/к/epd-analyzer
-ExecStart=/путь/к/venv/bin/python3 /путь/к/epd-analyzer/frontend.py
-Restart=on-failure
-RestartSec=10
-StandardOutput=append:/путь/к/логам/frontend.log
-StandardError=append:/путь/к/логам/frontend.log
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=default.target
-```
-
-Затем выполните:
+Установите тестовые зависимости:
 ```bash
-systemctl --user daemon-reload
-systemctl --user enable epd-frontend.service
-systemctl --user start epd-frontend.service
+pip install -r requirements-test.txt
 ```
 
-Для автозапуска при загрузке системы (даже без входа пользователя) включите linger:
+Запуск всех тестов:
 ```bash
-sudo loginctl enable-linger ваш_пользователь
+pytest
 ```
 
-## Logrotate
-
-Создайте файл `/etc/logrotate.d/epd` (если логи в `/var/log/epd`) или `/etc/logrotate.d/epd-user` (если в домашней папке) с содержимым:
-
-```
-/путь/к/папке/с/логами/*.log {
-    daily
-    rotate 30
-    compress
-    delaycompress
-    missingok
-    notifempty
-    copytruncate
-    dateext
-    dateformat -%Y%m%d
-}
+С покрытием:
+```bash
+pytest --cov=. --cov-report=html
 ```
 
-## Примечания
+## 🚦 CI/CD
 
-- Все конфиденциальные данные (email, токены) должны быть заменены на реальные в `config.ini`.
-- Для работы с OpenRouter требуется API-ключ и модель; для локальной Ollama — запущенный сервер.
-- В шаблонах getmail_filter используются простые подстроки (вхождение). При необходимости можно заменить на регулярные выражения.
-- При ошибках AI-анализа сообщение в Telegram всё равно отправляется, но блок анализа заменяется на "Анализ не проведен".
-- Для корректной работы с getmail убедитесь, что пути в конфиге абсолютные и права доступа правильные.
+Проект содержит GitHub Actions workflow (`.github/workflows/tests.yml`), который автоматически запускает тесты при push/pull request в ветки `main`/`master`.
 
-## Лицензия
+## 📁 Структура проекта
 
-MIT# epd-service
-Service to parse EPD from Moscow government service, store them in the DB, make AI analysis and send via Telegram
+```
+epd-system/
+├── .github/workflows/tests.yml
+├── config.ini
+├── ai_config.yaml
+├── requirements.txt
+├── requirements-test.txt
+├── README.md
+├── init_db.py
+├── frontend.py
+├── orchestrator.py
+├── getmail_filter.py
+├── utils.py
+├── parsers/
+│   ├── base_parser.py
+│   └── mos_parser.py
+├── templates/
+│   └── index.html
+├── tests/
+│   ├── conftest.py
+│   ├── test_utils.py
+│   ├── test_parsers.py
+│   ├── test_orchestrator.py
+│   ├── test_frontend.py
+│   ├── test_getmail_filter.py
+│   ├── test_db_init.py
+│   └── pytest.ini
+└── static/ (опционально)
+```
+
+
+## 📄 Лицензия
+
+MIT
