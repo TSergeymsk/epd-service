@@ -3,9 +3,17 @@ import sys
 from unittest.mock import patch, MagicMock
 import pytest
 
-# Мокаем setup_logging до импорта orchestrator
-with patch('orchestrator.setup_logging') as mock_log:
-    mock_log.return_value = MagicMock()
+# Мокаем utils.setup_logging до импорта orchestrator
+with patch('utils.setup_logging') as mock_setup_logging:
+    mock_setup_logging.return_value = MagicMock()
+    # Импортируем orchestrator
+    import orchestrator
+    # Подменяем его глобальный logger на мок
+    orchestrator.logger = MagicMock()
+    # Подменяем setup_logger, чтобы он не создавал реальный логгер
+    orchestrator.setup_logger = lambda: None
+
+    # Импортируем тестируемые функции из orchestrator
     from orchestrator import (
         clean_markdown,
         is_ai_configured,
@@ -25,10 +33,9 @@ def test_clean_markdown():
     assert "Заголовок" in cleaned
     assert "код" in cleaned
     assert "ссылка" in cleaned
-    # Строка с --- удаляется
     assert "---" not in cleaned
 
-def test_is_ai_configured_with_config(mock_config):
+def test_is_ai_configured_with_config():
     class MockConfig:
         def get(self, section, key):
             if section == 'openrouter' and key == 'api_key':
