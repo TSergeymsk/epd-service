@@ -16,11 +16,13 @@ def get_config_path():
     return str(Path(__file__).parent / 'config.ini')
 
 def get_db_path():
+    """Возвращает путь к БД из конфига, или ':memory:' если секция отсутствует."""
     config = configparser.ConfigParser()
     config.read(get_config_path())
-    return config.get('paths', 'db_path')
-
-DB_PATH = get_db_path()
+    if config.has_section('paths') and config.has_option('paths', 'db_path'):
+        return config.get('paths', 'db_path')
+    # fallback для тестов
+    return ':memory:'
 
 # Схема с новыми таблицами (добавляем только отсутствующие)
 NEW_TABLES = """
@@ -161,7 +163,7 @@ CREATE TABLE IF NOT EXISTS raw_imports (
 def check_db(db_path=None):
     """Проверяет существование БД и наличие таблицы accounts."""
     if db_path is None:
-        db_path = DB_PATH
+        db_path = get_db_path()
     if not os.path.exists(db_path):
         return False
     try:
@@ -175,7 +177,8 @@ def check_db(db_path=None):
         return False
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
     cursor.execute("PRAGMA journal_mode = WAL;")
@@ -194,16 +197,17 @@ def init_db():
     
     conn.commit()
     conn.close()
-    print(f"База данных инициализирована/обновлена: {DB_PATH}")
+    print(f"База данных инициализирована/обновлена: {db_path}")
     print("Все таблицы и индексы созданы (если отсутствовали).")
 
 def check_and_migrate():
-    if not os.path.exists(DB_PATH):
+    db_path = get_db_path()
+    if not os.path.exists(db_path):
         print("База данных не существует. Будет создана новая.")
         init_db()
         return
     
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='filter_rules';")
     if not cursor.fetchone():

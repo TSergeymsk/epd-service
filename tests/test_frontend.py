@@ -1,7 +1,5 @@
 """Тесты для frontend API."""
 import pytest
-import json
-from flask import Flask
 from frontend import app
 from unittest.mock import patch
 
@@ -14,7 +12,7 @@ def client():
 def test_index(client):
     rv = client.get('/')
     assert rv.status_code == 200
-    assert b'Анализ ЕПД' in rv.data
+    assert 'Анализ ЕПД' in rv.data.decode('utf-8')
 
 def test_api_addresses_empty(client):
     with patch('frontend.get_db') as mock_db:
@@ -27,9 +25,7 @@ def test_api_addresses_empty(client):
 def test_api_accounts_by_address(client):
     with patch('frontend.get_db') as mock_db:
         mock_conn = mock_db.return_value
-        mock_conn.execute.return_value.fetchall.return_value = [
-            {'id': 1, 'account_number': '123'}
-        ]
+        mock_conn.execute.return_value.fetchall.return_value = [{'id': 1, 'account_number': '123'}]
         rv = client.get('/api/accounts_by_address?address=test')
         assert rv.status_code == 200
         assert rv.json == [{'id': 1, 'account_number': '123'}]
@@ -37,9 +33,7 @@ def test_api_accounts_by_address(client):
 def test_api_services(client):
     with patch('frontend.get_db') as mock_db:
         mock_conn = mock_db.return_value
-        mock_conn.execute.return_value.fetchall.return_value = [
-            {'id': 1, 'name': 'Service1', 'unit': 'ед'}
-        ]
+        mock_conn.execute.return_value.fetchall.return_value = [{'id': 1, 'name': 'Service1', 'unit': 'ед'}]
         rv = client.get('/api/services')
         assert rv.status_code == 200
         assert rv.json == [{'id': 1, 'name': 'Service1', 'unit': 'ед'}]
@@ -47,9 +41,7 @@ def test_api_services(client):
 def test_api_periods(client):
     with patch('frontend.get_db') as mock_db:
         mock_conn = mock_db.return_value
-        mock_conn.execute.return_value.fetchall.return_value = [
-            {'year': 2024, 'month': 1}
-        ]
+        mock_conn.execute.return_value.fetchall.return_value = [{'year': 2024, 'month': 1}]
         rv = client.get('/api/periods?account_ids=1')
         assert rv.status_code == 200
         assert rv.json == [{'year': 2024, 'month': 1}]
@@ -70,7 +62,6 @@ def test_api_analysis_for_month_not_found(client):
 def test_api_llm_details_not_found(client):
     with patch('frontend.get_db') as mock_db:
         mock_conn = mock_db.return_value
-        # period_id не найден
         mock_conn.execute.return_value.fetchone.return_value = None
         rv = client.get('/api/llm_details?address=test&year=2024&month=1')
         assert rv.status_code == 404
@@ -79,7 +70,6 @@ def test_api_llm_details_not_found(client):
 def test_api_retry_ai(client):
     with patch('frontend.get_db') as mock_db:
         mock_conn = mock_db.return_value
-        # Имитируем существующий период и запись
         mock_conn.execute.return_value.fetchone.side_effect = [
             {'id': 1},  # период
             {'id': 10}  # существующий llm_requests
