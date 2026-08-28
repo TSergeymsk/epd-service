@@ -8,7 +8,7 @@ import logging
 import os
 import json
 from pathlib import Path
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, send_from_directory
 
 # Загрузка конфигурации
 def get_config_path():
@@ -23,14 +23,12 @@ def load_config():
     return config
 
 def setup_logging():
-    """Инициализирует логирование. Использует конфиг или fallback."""
     config = load_config()
-    log_dir = '/tmp/logs'  # fallback
+    log_dir = '/tmp/logs'
     try:
         if config.has_section('logging') and config.has_option('logging', 'log_dir'):
             log_dir = config.get('logging', 'log_dir')
         else:
-            # Попытка создать каталог в текущей директории
             log_dir = os.path.join(os.path.dirname(__file__), 'logs')
     except Exception:
         pass
@@ -46,7 +44,6 @@ def setup_logging():
     )
     return logging.getLogger(__name__)
 
-# Создаём логгер лениво (при первом вызове)
 _logger = None
 def get_logger():
     global _logger
@@ -56,7 +53,6 @@ def get_logger():
 
 config = load_config()
 
-# Параметры с fallback для тестов
 def get_db_path():
     if config.has_section('paths') and config.has_option('paths', 'db_path'):
         return config.get('paths', 'db_path')
@@ -96,7 +92,6 @@ def get_period_id(conn, year, month):
     return row['id'] if row else None
 
 def get_aggregated_data(conn, address, period_id):
-    """Возвращает агрегированные данные для адреса и периода."""
     cur = conn.execute("SELECT id FROM accounts WHERE address = ?", (address,))
     account_ids = [row['id'] for row in cur.fetchall()]
     if not account_ids:
@@ -200,7 +195,6 @@ def get_aggregated_data(conn, address, period_id):
     return current, prev_data, prev_ym, last_12_data
 
 def generate_telegram_message(conn, address, period_id):
-    """Генерирует текст сообщения для Telegram (используется в эндпоинте retry_telegram)"""
     cur = conn.execute("""
         SELECT response_text, model
         FROM llm_requests
@@ -236,7 +230,95 @@ def generate_telegram_message(conn, address, period_id):
         lines.append("<i>Анализ не проведён</i>")
     return "\n".join(lines)
 
-# ------------------ Маршруты ------------------
+# ------------------ API для очереди задач ------------------
+@app.route('/api/queue_status')
+def queue_status():
+    conn = get_db()
+    # AI запросы
+    cur = conn.execute("SELECT COUNT(*) as count FROM llm_requests WHERE status = 'pending'")
+    llm_pending = cur.fetchone()['count']
+    # Telegram сообщения
+    cur = conn.execute("SELECT COUNT(*) as count FROM telegram_messages WHERE status = 'pending'")
+    tg_pending = cur.fetchone()['count']
+    conn.close()
+    return jsonify({
+        'llm_pending': llm_pending,
+        'tg_pending': tg_pending
+    })
+
+# ------------------ API для управления правилами фильтрации ------------------
+@app.route('/api/filter_rules')
+def filter_rules():
+    conn = get_db()
+    cur = conn.execute("SELECT * FROM filter_rules ORDER BY priority DESC")
+    rules = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return jsonify(rules)
+
+@app.route('/api/filter_rules', methods=['POST'])
+def add_filter_rule():
+    data = request.get_json()
+    required = ['name', 'from_pattern', 'to_pattern', 'subject_pattern', 'parser_script']
+    for field in required:
+        if not data.get(field):
+            return jsonify({'error': f'Missing field: {field}'}), 400
+    conn = get_db()
+    cur = conn.execute("""
+        INSERT INTO filter_rules (name, from_pattern, to_pattern, subject_pattern, parser_script, enabled, priority)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        data['name'],
+        data['from_pattern'],
+        data['to_pattern'],
+        data['subject_pattern'],
+        data['parser_script'],
+        data.get('enabled', True),
+        data.get('priority', 0)
+    ))
+    conn.commit()
+    new_id = cur.lastrowid
+    conn.close()
+    return jsonify({'id': new_id, 'status': 'ok'}), 201
+
+@app.route('/api/filter_rules/<int:rule_id>', methods=['PUT'])
+def update_filter_rule(rule_id):
+    data = request.get_json()
+    conn = get_db()
+    cur = conn.execute("SELECT id FROM filter_rules WHERE id = ?", (rule_id,))
+    if not cur.fetchone():
+        conn.close()
+        return jsonify({'error': 'Rule not found'}), 404
+    conn.execute("""
+        UPDATE filter_rules
+        SET name = ?, from_pattern = ?, to_pattern = ?, subject_pattern = ?, parser_script = ?, enabled = ?, priority = ?
+        WHERE id = ?
+    """, (
+        data.get('name'),
+        data.get('from_pattern'),
+        data.get('to_pattern'),
+        data.get('subject_pattern'),
+        data.get('parser_script'),
+        data.get('enabled', True),
+        data.get('priority', 0),
+        rule_id
+    ))
+    conn.commit()
+    conn.close()
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/filter_rules/<int:rule_id>', methods=['DELETE'])
+def delete_filter_rule(rule_id):
+    conn = get_db()
+    cur = conn.execute("SELECT id FROM filter_rules WHERE id = ?", (rule_id,))
+    if not cur.fetchone():
+        conn.close()
+        return jsonify({'error': 'Rule not found'}), 404
+    conn.execute("DELETE FROM filter_rules WHERE id = ?", (rule_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'status': 'ok'})
+
+# ------------------ Маршруты (существующие) ------------------
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -417,7 +499,6 @@ def analysis_for_month():
     else:
         return jsonify({"error": "No analysis found"}), 404
 
-# ------------------ НОВЫЕ ЭНДПОИНТЫ ------------------
 @app.route('/api/llm_details')
 def llm_details():
     address = request.args.get('address')
@@ -457,7 +538,7 @@ def llm_details():
             "status": row['status'],
             "attempts": row['attempts'],
             "last_error": row['last_error'],
-            "created_at": row['updated_at']  # показываем время последнего обновления
+            "created_at": row['updated_at']
         })
     else:
         return jsonify({"error": "No LLM request found"}), 404
@@ -543,9 +624,14 @@ def retry_telegram():
     conn.close()
     return jsonify({"status": "ok"})
 
+# ------------------ favicon ------------------
+@app.route('/favicon.ico')
+def favicon():
+    return send_from_directory(os.path.join(app.root_path, 'static'),
+                               'favicon.ico', mimetype='image/vnd.microsoft.icon')
+
 # ------------------ Запуск ------------------
 if __name__ == '__main__':
-    # Инициализируем логгер только при запуске
     logger = get_logger()
     logger.info("Запуск фронтенда")
     app.run(host='0.0.0.0', port=PORT, debug=DEBUG)
