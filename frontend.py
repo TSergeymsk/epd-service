@@ -17,12 +17,23 @@ def get_config_path():
         return env_path
     return str(Path(__file__).parent / 'config.ini')
 
-config_path = get_config_path()
-config = configparser.ConfigParser()
-config.read(config_path)
+def load_config():
+    config = configparser.ConfigParser()
+    config.read(get_config_path())
+    return config
 
-def setup_logging(config):
-    log_dir = config.get('logging', 'log_dir')
+def setup_logging():
+    """Инициализирует логирование. Использует конфиг или fallback."""
+    config = load_config()
+    log_dir = '/tmp/logs'  # fallback
+    try:
+        if config.has_section('logging') and config.has_option('logging', 'log_dir'):
+            log_dir = config.get('logging', 'log_dir')
+        else:
+            # Попытка создать каталог в текущей директории
+            log_dir = os.path.join(os.path.dirname(__file__), 'logs')
+    except Exception:
+        pass
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, 'frontend.log')
     logging.basicConfig(
@@ -35,12 +46,41 @@ def setup_logging(config):
     )
     return logging.getLogger(__name__)
 
-logger = setup_logging(config)
+# Создаём логгер лениво (при первом вызове)
+_logger = None
+def get_logger():
+    global _logger
+    if _logger is None:
+        _logger = setup_logging()
+    return _logger
 
-DB_PATH = config.get('paths', 'db_path')
-PORT = config.getint('frontend', 'port')
-STATIC_DIR = config.get('frontend', 'static_dir', fallback='static')
-DEBUG = config.getboolean('frontend', 'debug', fallback=False)
+config = load_config()
+
+# Параметры с fallback для тестов
+def get_db_path():
+    if config.has_section('paths') and config.has_option('paths', 'db_path'):
+        return config.get('paths', 'db_path')
+    return ':memory:'
+
+def get_port():
+    if config.has_section('frontend') and config.has_option('frontend', 'port'):
+        return config.getint('frontend', 'port')
+    return 5000
+
+def get_static_dir():
+    if config.has_section('frontend') and config.has_option('frontend', 'static_dir'):
+        return config.get('frontend', 'static_dir')
+    return 'static'
+
+def get_debug():
+    if config.has_section('frontend') and config.has_option('frontend', 'debug'):
+        return config.getboolean('frontend', 'debug')
+    return False
+
+DB_PATH = get_db_path()
+PORT = get_port()
+STATIC_DIR = get_static_dir()
+DEBUG = get_debug()
 
 app = Flask(__name__, static_folder=STATIC_DIR)
 
@@ -56,14 +96,13 @@ def get_period_id(conn, year, month):
     return row['id'] if row else None
 
 def get_aggregated_data(conn, address, period_id):
-    """Возвращает агрегированные данные для адреса и периода (аналогично как в orchestrator)"""
+    """Возвращает агрегированные данные для адреса и периода."""
     cur = conn.execute("SELECT id FROM accounts WHERE address = ?", (address,))
     account_ids = [row['id'] for row in cur.fetchall()]
     if not account_ids:
         return [], None, None, {}
 
     placeholders = ','.join('?' * len(account_ids))
-    # Текущий месяц
     query = f"""
         SELECT s.name,
                SUM(c.amount_due) as total_amount,
@@ -162,7 +201,6 @@ def get_aggregated_data(conn, address, period_id):
 
 def generate_telegram_message(conn, address, period_id):
     """Генерирует текст сообщения для Telegram (используется в эндпоинте retry_telegram)"""
-    # Получаем успешный LLM-ответ
     cur = conn.execute("""
         SELECT response_text, model
         FROM llm_requests
@@ -439,7 +477,6 @@ def retry_ai():
         conn.close()
         return jsonify({"error": "Period not found"}), 404
 
-    # Проверяем, есть ли уже запись для этого периода
     cur = conn.execute("""
         SELECT id FROM llm_requests
         WHERE address = ? AND period_id = ?
@@ -447,14 +484,12 @@ def retry_ai():
     """, (address, period_id))
     existing = cur.fetchone()
     if existing:
-        # Сбрасываем статус
         conn.execute("""
             UPDATE llm_requests
             SET status = 'pending', attempts = 0, last_error = NULL, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
         """, (existing['id'],))
     else:
-        # Создаём новую запись (заполним позже в оркестраторе)
         conn.execute("""
             INSERT INTO llm_requests (address, period_id, model, status)
             VALUES (?, ?, ?, 'pending')
@@ -478,7 +513,6 @@ def retry_telegram():
         conn.close()
         return jsonify({"error": "Period not found"}), 404
 
-    # Проверяем, есть ли успешный LLM-ответ
     cur = conn.execute("""
         SELECT id FROM llm_requests
         WHERE address = ? AND period_id = ? AND status = 'success'
@@ -487,7 +521,6 @@ def retry_telegram():
         conn.close()
         return jsonify({"error": "No successful LLM response for this period"}), 400
 
-    # Проверяем, есть ли уже сообщение
     cur = conn.execute("""
         SELECT id FROM telegram_messages
         WHERE address = ? AND period_id = ?
@@ -501,7 +534,6 @@ def retry_telegram():
             WHERE id = ?
         """, (existing['id'],))
     else:
-        # Генерируем текст сообщения
         msg_text = generate_telegram_message(conn, address, period_id)
         conn.execute("""
             INSERT INTO telegram_messages (address, period_id, message_text, status)
@@ -513,4 +545,7 @@ def retry_telegram():
 
 # ------------------ Запуск ------------------
 if __name__ == '__main__':
+    # Инициализируем логгер только при запуске
+    logger = get_logger()
+    logger.info("Запуск фронтенда")
     app.run(host='0.0.0.0', port=PORT, debug=DEBUG)
