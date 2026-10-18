@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """
 Парсер для писем от uslugi@mos.ru.
-Извлекает данные из HTML или текста и сохраняет в БД.
+Извлекает данные из HTML или текста, сохраняет в БД
+и ставит задачу на LLM-анализ (llm_requests.status='pending').
+
+Схема llm_requests:
+    id, address TEXT NOT NULL, period_id INTEGER NOT NULL, model TEXT NOT NULL,
+    provider TEXT, temperature, max_tokens, prompt_template, request_payload,
+    response_text, tokens_used, status DEFAULT 'pending', attempts, last_error,
+    created_at, updated_at
+Ключ задачи — (address, period_id), НЕ account_id.
 """
 import os
 import sys
@@ -21,6 +29,7 @@ from parsers.base_parser import (
 )
 
 logger = logging.getLogger(__name__)
+
 
 def parse_html_email(html_content):
     soup = BeautifulSoup(html_content, 'html.parser')
@@ -165,6 +174,7 @@ def parse_html_email(html_content):
         logger.info("Не удалось найти таблицу с услугами в HTML")
         return None
 
+
 def parse_text_epd(text):
     data = {
         'account_number': None,
@@ -281,6 +291,111 @@ def parse_text_epd(text):
     logger.info(f"Текстовый парсер нашёл услуг: {len(data['services'])}")
     return data
 
+
+def _get_ai_model_and_provider():
+    """
+    Возвращает (model, provider) для полей llm_requests.model (NOT NULL)
+    и llm_requests.provider. Оркестратор эти поля не использует при вызове
+    LLM (модель берёт из своего конфига), но model обязан быть заполнен.
+
+    Пытается взять значения из config.AI_CONFIG, затем из атрибутов
+    config.*, затем из переменных окружения. Если ничего не найдено —
+    возвращает безопасный дефолт и пишет warning в лог.
+    """
+    model = None
+    provider = None
+
+    try:
+        from config import AI_CONFIG  # type: ignore
+        if isinstance(AI_CONFIG, dict):
+            ai = AI_CONFIG.get('ai') if isinstance(AI_CONFIG.get('ai'), dict) else AI_CONFIG
+            if isinstance(ai, dict):
+                model = ai.get('model') or model
+                provider = ai.get('provider') or provider
+    except Exception:
+        pass
+
+    try:
+        import config  # type: ignore
+        model = getattr(config, 'AI_MODEL', None) or model
+        provider = getattr(config, 'AI_PROVIDER', None) or provider
+    except Exception:
+        pass
+
+    if not model:
+        for env in ('AI_MODEL', 'OPENAI_MODEL', 'LLM_MODEL'):
+            if os.environ.get(env):
+                model = os.environ[env]
+                break
+    if not provider:
+        for env in ('AI_PROVIDER', 'OPENAI_PROVIDER'):
+            if os.environ.get(env):
+                provider = os.environ[env]
+                break
+
+    if not model:
+        model = 'gpt-4o-mini'
+        logger.warning(
+            "Не удалось определить AI-модель из config/env — "
+            "в llm_requests.model записано '%s' (оркестратор поле model не читает)",
+            model,
+        )
+    return model, provider
+
+
+def enqueue_llm_request(conn, address, period_id):
+    """
+    Ставит задачу на LLM-анализ для пары (address, period_id).
+
+    Схема llm_requests: address TEXT NOT NULL, period_id INTEGER NOT NULL,
+    model TEXT NOT NULL, provider TEXT, status DEFAULT 'pending'.
+
+    Идемпотентно: не создаёт дубликат, если для этой пары уже есть запись
+    в статусе pending/processing/success. failed/retry_limit не блокируют —
+    оркестратор сам обрабатывает повторные попытки
+    (get_pending_llm_requests берёт status IN ('pending','failed') AND attempts < MAX_RETRIES).
+
+    Возвращает True, если задача создана; False — если пропущено.
+    """
+    if not address:
+        raise ValueError(
+            "llm_requests.address NOT NULL, но адрес не извлечён из письма — "
+            "оркестратор не сможет найти данные через get_data_for_analysis()"
+        )
+
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, status FROM llm_requests
+        WHERE address = ? AND period_id = ?
+          AND status IN ('pending', 'processing', 'success')
+        LIMIT 1
+        """,
+        (address, period_id),
+    )
+    existing = cur.fetchone()
+    if existing:
+        logger.info(
+            "LLM-задача для (%r, period_id=%s) уже в статусе '%s' (id=%s) — пропускаем",
+            address, period_id, existing[1], existing[0],
+        )
+        return False
+
+    model, provider = _get_ai_model_and_provider()
+    cur.execute(
+        """
+        INSERT INTO llm_requests (address, period_id, model, provider, status)
+        VALUES (?, ?, ?, ?, 'pending')
+        """,
+        (address, period_id, model, provider),
+    )
+    logger.info(
+        "Создана LLM-задача: address=%r, period_id=%s, model=%s, provider=%s",
+        address, period_id, model, provider,
+    )
+    return True
+
+
 def process_email_file(filepath, mail_id):
     """
     Основная функция обработки файла письма.
@@ -342,11 +457,12 @@ def process_email_file(filepath, mail_id):
         logger.error(error)
         return False, error
 
-    # Сохраняем в БД
+    # ---- Сохранение в БД + постановка задачи на LLM ----
+    conn = get_db_connection()
     try:
-        conn = get_db_connection()
         account_id = get_or_create_account(conn, parsed_data['account_number'], parsed_data['address'] or '')
         period_id = get_or_create_period(conn, parsed_data['year'], parsed_data['month'])
+        conn.commit()  # фиксируем account/period, чтобы FK в llm_requests были валидны
 
         # Сохраняем доп. информацию
         if parsed_data.get('period_info'):
@@ -369,6 +485,7 @@ def process_email_file(filepath, mail_id):
 
         # Сохраняем услуги
         save_charges(conn, account_id, period_id, parsed_data['services'])
+        conn.commit()  # на случай, если save_charges не коммитит сама
 
         # Сохраняем запись о сыром импорте
         cursor = conn.cursor()
@@ -377,14 +494,44 @@ def process_email_file(filepath, mail_id):
             VALUES (?, ?, ?, ?)
         """, ('email', mail_id, filepath, account_id))
         conn.commit()
-        conn.close()
 
-        logger.info(f"Данные из письма {filepath} успешно сохранены в БД")
+        # === Ставим задачу на LLM-анализ ===
+        # llm_requests ключуется по (address, period_id), а НЕ по account_id.
+        # Берём адрес из accounts — чтобы он гарантированно совпал с тем,
+        # что оркестратор ищет через get_data_for_analysis(address, period_ym).
+        # Если постановка задачи падает — данные уже в БД, откатывать их не нужно;
+        # ошибку логируем и возвращаем False, чтобы она попала в мониторинг.
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT address FROM accounts WHERE id = ?", (account_id,))
+            row = cur.fetchone()
+            llm_address = (row[0] if row and row[0] else (parsed_data.get('address') or '')).strip()
+
+            enqueue_llm_request(conn, llm_address, period_id)
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logger.exception(
+                "Данные сохранены, но LLM-задача НЕ создана "
+                "(account_id=%s, period_id=%s, address=%r, mail_id=%s): %s",
+                account_id, period_id, parsed_data.get('address'), mail_id, e,
+            )
+            return False, f"Данные сохранены, но LLM-задача не создана: {e}"
+
+        logger.info(
+            "Письмо %s обработано: данные в БД, LLM-задача поставлена (address=%r, period_id=%s)",
+            filepath, llm_address, period_id,
+        )
         return True, None
+
     except Exception as e:
+        conn.rollback()
         error = f"Ошибка сохранения в БД: {e}"
         logger.exception(error)
         return False, error
+    finally:
+        conn.close()
+
 
 if __name__ == "__main__":
     # Для тестирования: python3 parsers/mos_parser.py <email_file> <mail_id>
@@ -392,8 +539,7 @@ if __name__ == "__main__":
         filepath = sys.argv[1]
         mail_id = sys.argv[2] if len(sys.argv) > 2 else 'test'
         # Настройка логирования
-        from utils import setup_logging
-        logger = setup_logging('mos_parser')
+        setup_logging('mos_parser')
         success, err = process_email_file(filepath, mail_id)
         if success:
             print("OK")
