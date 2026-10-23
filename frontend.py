@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify, send_from_directory
 
+from notifications import enqueue_notifications
+
 # Загрузка конфигурации
 def get_config_path():
     env_path = os.environ.get('EPD_CONFIG')
@@ -194,42 +196,6 @@ def get_aggregated_data(conn, address, period_id):
 
     return current, prev_data, prev_ym, last_12_data
 
-def generate_telegram_message(conn, address, period_id):
-    cur = conn.execute("""
-        SELECT response_text, model
-        FROM llm_requests
-        WHERE address = ? AND period_id = ? AND status = 'success'
-        ORDER BY updated_at DESC
-        LIMIT 1
-    """, (address, period_id))
-    llm_row = cur.fetchone()
-    ai_response = llm_row['response_text'] if llm_row else None
-
-    current, _, _, _ = get_aggregated_data(conn, address, period_id)
-    total = sum(item['amount_due'] for item in current) if current else 0
-
-    cur = conn.execute("SELECT year, month FROM periods WHERE id = ?", (period_id,))
-    period = cur.fetchone()
-    period_str = f"{period['year']}-{period['month']:02d}"
-
-    lines = []
-    lines.append("<b>Анализ ЕПД</b>")
-    lines.append(f"🏠 <b>Адрес:</b> {address}")
-    lines.append(f"📅 <b>Период:</b> {period_str}")
-    lines.append("")
-    lines.append(f"💰 <b>Итого: {total:,.2f} руб.</b>")
-    if current:
-        lines.append("В т.ч.:")
-        for item in sorted(current, key=lambda x: x['amount_due'], reverse=True):
-            lines.append(f"🔹 <b>{item['name']}:</b> {item['amount_due']:,.2f} руб. (кол-во: {item['quantity']:.3f})")
-    lines.append("")
-    if ai_response:
-        lines.append("<b>Анализ:</b>")
-        lines.append(ai_response)
-    else:
-        lines.append("<i>Анализ не проведён</i>")
-    return "\n".join(lines)
-
 # ------------------ API для очереди задач ------------------
 @app.route('/api/queue_status')
 def queue_status():
@@ -237,13 +203,23 @@ def queue_status():
     # AI запросы
     cur = conn.execute("SELECT COUNT(*) as count FROM llm_requests WHERE status = 'pending'")
     llm_pending = cur.fetchone()['count']
-    # Telegram сообщения
-    cur = conn.execute("SELECT COUNT(*) as count FROM telegram_messages WHERE status = 'pending'")
+    # Уведомления: раздельно по каналам + общий счётчик
+    cur = conn.execute("""
+        SELECT COUNT(*) as count FROM telegram_messages
+        WHERE status = 'pending' AND (channel = 'telegram' OR channel IS NULL)
+    """)
     tg_pending = cur.fetchone()['count']
+    cur = conn.execute("""
+        SELECT COUNT(*) as count FROM telegram_messages
+        WHERE status = 'pending' AND channel = 'vk'
+    """)
+    vk_pending = cur.fetchone()['count']
     conn.close()
     return jsonify({
         'llm_pending': llm_pending,
-        'tg_pending': tg_pending
+        'tg_pending': tg_pending,
+        'vk_pending': vk_pending,
+        'notifications_pending': tg_pending + vk_pending,
     })
 
 # ------------------ API для управления правилами фильтрации ------------------
@@ -581,6 +557,12 @@ def retry_ai():
 
 @app.route('/api/retry_telegram', methods=['POST'])
 def retry_telegram():
+    """Ручная повторная отправка уведомления.
+
+    Исторически endpoint называется retry_telegram (для совместимости с UI),
+    но фактически ставит задачу на отправку во ВСЕ включённые мессенджеры.
+    Существующие записи для address/period сбрасываются в pending.
+    """
     data = request.get_json()
     address = data.get('address')
     year = data.get('year')
@@ -602,27 +584,20 @@ def retry_telegram():
         conn.close()
         return jsonify({"error": "No successful LLM response for this period"}), 400
 
-    cur = conn.execute("""
-        SELECT id FROM telegram_messages
-        WHERE address = ? AND period_id = ?
-        ORDER BY created_at DESC LIMIT 1
-    """, (address, period_id))
-    existing = cur.fetchone()
-    if existing:
-        conn.execute("""
-            UPDATE telegram_messages
-            SET status = 'pending', attempts = 0, last_error = NULL, sent_at = NULL
-            WHERE id = ?
-        """, (existing['id'],))
-    else:
-        msg_text = generate_telegram_message(conn, address, period_id)
-        conn.execute("""
-            INSERT INTO telegram_messages (address, period_id, message_text, status)
-            VALUES (?, ?, ?, 'pending')
-        """, (address, period_id, msg_text))
-    conn.commit()
+    # Ставим задачи на ВСЕ включённые каналы, сбрасывая существующие записи.
+    # message_text=None → в БД запишется пустая строка, и оркестратор
+    # сформирует текст в едином plain-формате перед отправкой.
+    result = enqueue_notifications(
+        conn,
+        address=address,
+        period_id=period_id,
+        message_text=None,
+        ini_config=config,
+        logger=get_logger(),
+        reset_existing=True,
+    )
     conn.close()
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "channels": result})
 
 # ------------------ favicon ------------------
 @app.route('/favicon.ico')

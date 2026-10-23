@@ -9,11 +9,29 @@ static_dir = static
 debug = false
 
 [openrouter]
-api_key = gsk_<token>
+api_key = gsk_
 
 [telegram]
-bot_token = <token>
-chat_id = <chat>
+bot_token =
+chat_id =
+
+[gigachat]
+credentials = your_gigachat_credentials
+scope = GIGACHAT_API_PERS
+base_url = https://api.giga.chat/v1
+
+[vk]
+access_token =
+peer_id =
+enabled = true
+
+[notifications]
+telegram_enabled = true
+vk_enabled = true
+
+[ssl]
+# Путь к каталогу или файлу с CA-сертификатами (например, сертификаты Минцифры)
+ca_bundle_path = /etc/ssl/certs/mintsifry_ca.pem
 
 [logging]
 log_dir = /var/log/epd/

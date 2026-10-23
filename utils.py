@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
-Общие утилиты: загрузка конфигурации, логирование, работа с БД.
-"""
+""" Общие утилиты: загрузка конфигурации, логирование, работа с БД. """
 import os
 import sys
 import logging
@@ -41,6 +39,15 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
+
+def get_ca_bundle_path():
+    """Возвращает путь к CA-сертификатам из конфига (секция [ssl])."""
+    config = load_ini_config()
+    if config.has_option('ssl', 'ca_bundle_path'):
+        path = config.get('ssl', 'ca_bundle_path')
+        if path and path.strip():
+            return path
+    return None
 
 def setup_logging(name, log_dir=None):
     if log_dir is None:

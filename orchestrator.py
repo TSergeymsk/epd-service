@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
-Оркестратор для AI-анализа и отправки Telegram-сообщений.
-"""
+""" Оркестратор для AI-анализа и отправки уведомлений (Telegram + VK). """
 import os
 import sys
 import time
@@ -15,16 +13,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from utils import get_db_connection, load_ai_config, load_ini_config
+from notifications import enqueue_notifications
 
 # Конфигурация (глобальная, без логгера)
 INI_CONFIG = load_ini_config()
 AI_CONFIG = load_ai_config()
-
 MAX_RETRIES = 3
 SLEEP_BETWEEN_REQUESTS = 5
 
 # Логгер будет инициализирован в main()
 logger = None
+
 
 def setup_logger():
     """Инициализирует логгер (вызывается в main)."""
@@ -33,6 +32,7 @@ def setup_logger():
         return
     from utils import setup_logging
     logger = setup_logging('orchestrator')
+
 
 def clean_markdown(text):
     if not text:
@@ -48,52 +48,79 @@ def clean_markdown(text):
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
+
 def escape_html(text):
     if not text:
         return text
     return html.escape(text)
 
+
 def is_ai_configured():
     ai_cfg = AI_CONFIG.get('ai', {})
-    if not ai_cfg.get('url') or not ai_cfg.get('model'):
+    if not ai_cfg.get('url') and ai_cfg.get('provider') != 'gigachat':
         return False
-    api_key = INI_CONFIG.get('openrouter', 'api_key')
-    if not api_key or api_key.strip() == '' or api_key == 'local_ollama':
+    if not ai_cfg.get('model'):
         return False
+    provider = ai_cfg.get('provider', 'openrouter')
+    if provider == 'gigachat':
+        credentials = INI_CONFIG.get('gigachat', 'credentials')
+        if not credentials or credentials.strip() == '':
+            return False
+    else:
+        api_key = INI_CONFIG.get('openrouter', 'api_key')
+        if not api_key or api_key.strip() == '' or api_key == 'local_ollama':
+            return False
     return True
+
 
 def get_pending_llm_requests(conn):
     cur = conn.execute("""
         SELECT id, address, period_id, attempts
         FROM llm_requests
-        WHERE status IN ('pending', 'failed') AND attempts < ?
+        WHERE status IN ('pending', 'failed')
+          AND attempts < ?
         ORDER BY created_at
     """, (MAX_RETRIES,))
     return cur.fetchall()
+
 
 def get_pending_telegram_messages(conn):
     cur = conn.execute("""
         SELECT id, address, period_id, message_text, attempts
         FROM telegram_messages
-        WHERE status IN ('pending', 'failed') AND attempts < ?
+        WHERE status IN ('pending', 'failed')
+          AND attempts < ?
+          AND (channel = 'telegram' OR channel IS NULL)
         ORDER BY created_at
     """, (MAX_RETRIES,))
     return cur.fetchall()
 
+
+def get_pending_vk_messages(conn):
+    cur = conn.execute("""
+        SELECT id, address, period_id, message_text, attempts
+        FROM telegram_messages
+        WHERE status IN ('pending', 'failed')
+          AND attempts < ?
+          AND channel = 'vk'
+        ORDER BY created_at
+    """, (MAX_RETRIES,))
+    return cur.fetchall()
+
+
 def get_period_details(conn, period_id):
     cur = conn.execute("SELECT year, month FROM periods WHERE id = ?", (period_id,))
     return cur.fetchone()
+
 
 def get_aggregated_data(conn, address, period_id):
     cur = conn.execute("SELECT id FROM accounts WHERE address = ?", (address,))
     account_ids = [row['id'] for row in cur.fetchall()]
     if not account_ids:
         return [], None, None, {}
-
     placeholders = ','.join('?' * len(account_ids))
     query = f"""
-        SELECT s.name,
-               SUM(c.amount_due) as total_amount,
+        SELECT s.name, SUM(c.amount_due) as total_amount,
                SUM(c.quantity) as total_quantity
         FROM charges c
         JOIN services s ON c.service_id = s.id
@@ -113,7 +140,6 @@ def get_aggregated_data(conn, address, period_id):
             'tariff': avg_tariff,
             'amount_due': row['total_amount']
         })
-
     cur = conn.execute(f"""
         SELECT p.id, p.year, p.month
         FROM periods p
@@ -127,8 +153,7 @@ def get_aggregated_data(conn, address, period_id):
     prev_ym = None
     if prev_period:
         cur2 = conn.execute(f"""
-            SELECT s.name,
-                   SUM(c.amount_due) as total_amount,
+            SELECT s.name, SUM(c.amount_due) as total_amount,
                    SUM(c.quantity) as total_quantity
             FROM charges c
             JOIN services s ON c.service_id = s.id
@@ -147,7 +172,6 @@ def get_aggregated_data(conn, address, period_id):
                 'amount_due': row['total_amount']
             })
         prev_ym = f"{prev_period['year']}-{prev_period['month']:02d}"
-
     last_12_data = {}
     months_query = f"""
         SELECT DISTINCT p.year, p.month
@@ -166,13 +190,11 @@ def get_aggregated_data(conn, address, period_id):
             month_params.append(m['year'])
             month_params.append(m['month'])
         query_dyn = f"""
-            SELECT p.year, p.month, s.name,
-                   SUM(c.amount_due) as total_amount
+            SELECT p.year, p.month, s.name, SUM(c.amount_due) as total_amount
             FROM charges c
             JOIN periods p ON c.period_id = p.id
             JOIN services s ON c.service_id = s.id
-            WHERE c.account_id IN ({placeholders})
-              AND ({month_conditions})
+            WHERE c.account_id IN ({placeholders}) AND ({month_conditions})
             GROUP BY p.year, p.month, s.name
             ORDER BY p.year DESC, p.month DESC, s.name
         """
@@ -183,8 +205,8 @@ def get_aggregated_data(conn, address, period_id):
             if ym not in last_12_data:
                 last_12_data[ym] = {}
             last_12_data[ym][row['name']] = row['total_amount']
-
     return current, prev_data, prev_ym, last_12_data
+
 
 def format_prompt(address, period_ym, current_data, prev_data, prev_ym, last_12_data):
     prompts_conf = AI_CONFIG.get('prompts', {})
@@ -193,25 +215,28 @@ def format_prompt(address, period_ym, current_data, prev_data, prev_ym, last_12_
         if logger:
             logger.error("Шаблон промта (prompts.analysis) не задан в ai_config.yaml")
         return None
-
     total_current = sum(item['amount_due'] for item in current_data) if current_data else 0
     current_lines = [f"- Итого к оплате: {total_current:.2f} руб."]
     current_lines.append("- Структура услуг:")
     for r in current_data:
-        current_lines.append(f"  * {r['name']}: количество {r['quantity']:.3f}, средний тариф {r['tariff']:.2f} руб., сумма {r['amount_due']:.2f} руб.")
+        current_lines.append(
+            f"  * {r['name']}: количество {r['quantity']:.3f}, "
+            f"средний тариф {r['tariff']:.2f} руб., сумма {r['amount_due']:.2f} руб."
+        )
     current_str = "\n".join(current_lines)
-
     if prev_data:
         total_prev = sum(item['amount_due'] for item in prev_data)
         prev_lines = [f"Данные за предыдущий месяц {prev_ym}:"]
         prev_lines.append(f"- Итого к оплате: {total_prev:.2f} руб.")
         prev_lines.append("- Структура услуг:")
         for r in prev_data:
-            prev_lines.append(f"  * {r['name']}: количество {r['quantity']:.3f}, средний тариф {r['tariff']:.2f} руб., сумма {r['amount_due']:.2f} руб.")
+            prev_lines.append(
+                f"  * {r['name']}: количество {r['quantity']:.3f}, "
+                f"средний тариф {r['tariff']:.2f} руб., сумма {r['amount_due']:.2f} руб."
+            )
         prev_str = "\n".join(prev_lines)
     else:
         prev_str = "Данные за предыдущий месяц отсутствуют."
-
     dyn_lines = []
     if last_12_data:
         dyn_lines.append(f"Динамика за последние 12 месяцев (доступно {len(last_12_data)} месяцев):")
@@ -222,7 +247,6 @@ def format_prompt(address, period_ym, current_data, prev_data, prev_ym, last_12_
     else:
         dyn_lines.append("Данных за последние 12 месяцев недостаточно.")
     dyn_str = "\n".join(dyn_lines)
-
     return template.format(
         address=address,
         period=period_ym,
@@ -232,27 +256,30 @@ def format_prompt(address, period_ym, current_data, prev_data, prev_ym, last_12_
         dynamics=dyn_str
     )
 
+
 def call_ai_api(prompt, retries=3):
     ai_cfg = AI_CONFIG.get('ai', {})
+    provider = ai_cfg.get('provider', 'openrouter')
+    if provider == 'gigachat':
+        return call_gigachat_api(prompt, retries)
+    # fallback для openrouter / groq / ollama
     url = ai_cfg.get('url')
     model = ai_cfg.get('model')
     api_key = INI_CONFIG.get('openrouter', 'api_key')
     timeout = ai_cfg.get('timeout')
     temperature = ai_cfg.get('temperature')
     max_tokens = ai_cfg.get('max_tokens')
-
-    if not all([url, model, api_key, timeout is not None, temperature is not None, max_tokens is not None]):
+    if not all([url, model, api_key, timeout is not None,
+                temperature is not None, max_tokens is not None]):
         if logger:
             logger.error("Не все параметры AI заданы в конфиге")
         return None, None
-
     headers = {"Content-Type": "application/json"}
     if api_key and api_key.strip() and api_key != "local_ollama":
         headers["Authorization"] = f"Bearer {api_key}"
     if "openrouter.ai" in url:
         headers["HTTP-Referer"] = "http://localhost:5000"
         headers["X-Title"] = "EPD Analyzer"
-
     payload = {
         "model": model,
         "messages": [
@@ -262,11 +289,9 @@ def call_ai_api(prompt, retries=3):
         "max_tokens": max_tokens,
         "temperature": temperature
     }
-
     extra = ai_cfg.get('extra_params')
     if extra:
         payload.update(extra)
-
     for attempt in range(retries):
         try:
             if logger:
@@ -299,10 +324,105 @@ def call_ai_api(prompt, retries=3):
             if logger:
                 logger.exception(f"Ошибка при вызове AI API: {e}")
             return None, None
-
     if logger:
         logger.error(f"Не удалось получить ответ от AI после {retries} попыток")
     return None, None
+
+
+def call_gigachat_api(prompt, retries=3):
+    """Вызов GigaChat через официальную библиотеку (API >= 0.2.0)."""
+    try:
+        from gigachat import GigaChat
+        from gigachat.models import Chat, Messages, MessagesRole
+    except ImportError as e:
+        if logger:
+            logger.error(f"Библиотека gigachat не установлена или несовместима: {e}")
+        return None, None
+
+    ai_cfg = AI_CONFIG.get('ai', {})
+    credentials = INI_CONFIG.get('gigachat', 'credentials')
+    scope = INI_CONFIG.get('gigachat', 'scope', fallback='GIGACHAT_API_PERS')
+    base_url = INI_CONFIG.get('gigachat', 'base_url', fallback='https://api.giga.chat/v1')
+    timeout = ai_cfg.get('timeout', 120)
+    model = ai_cfg.get('model', 'GigaChat-2')
+    temperature = ai_cfg.get('temperature', 0.7)
+    max_tokens = ai_cfg.get('max_tokens', 2000)
+
+    # CA-сертификаты: библиотека ожидает путь к ФАЙЛУ, а не к каталогу
+    ca_bundle = INI_CONFIG.get('ssl', 'ca_bundle_path', fallback=None)
+    ca_bundle_file = None
+    if ca_bundle:
+        ca_bundle = ca_bundle.strip()
+        if os.path.isdir(ca_bundle):
+            if logger:
+                logger.error(
+                    f"ca_bundle_path указывает на каталог ({ca_bundle}). "
+                    f"Нужен путь к объединённому .pem-файлу."
+                )
+        elif os.path.isfile(ca_bundle):
+            ca_bundle_file = ca_bundle
+        else:
+            if logger:
+                logger.error(f"ca_bundle_path не найден: {ca_bundle}")
+
+    for attempt in range(retries):
+        try:
+            with GigaChat(
+                credentials=credentials,
+                scope=scope,
+                base_url=base_url,
+                model=model,
+                timeout=timeout,
+                ca_bundle_file=ca_bundle_file,
+            ) as client:
+                chat_request = Chat(
+                    messages=[
+                        Messages(
+                            role=MessagesRole.USER,
+                            content=prompt,
+                        )
+                    ],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                response = client.chat(chat_request)
+
+                answer = None
+                if getattr(response, 'choices', None):
+                    choice = response.choices[0]
+                    msg = getattr(choice, 'message', None)
+                    if msg is not None:
+                        content = getattr(msg, 'content', None)
+                        if isinstance(content, str):
+                            answer = content
+                        elif isinstance(content, list) and content:
+                            first = content[0]
+                            answer = getattr(first, 'text', None) or str(first)
+                if answer is None and getattr(response, 'messages', None):
+                    msg = response.messages[0]
+                    content = getattr(msg, 'content', None)
+                    if isinstance(content, str):
+                        answer = content
+                    elif isinstance(content, list) and content:
+                        answer = getattr(content[0], 'text', None) or str(content[0])
+
+                tokens = None
+                usage = getattr(response, 'usage', None)
+                if usage is not None:
+                    tokens = getattr(usage, 'total_tokens', None)
+
+                if answer is not None:
+                    return answer, tokens
+                else:
+                    if logger:
+                        logger.error(f"Не удалось извлечь текст ответа GigaChat: {response}")
+                    return None, None
+        except Exception as e:
+            if logger:
+                logger.exception(f"Ошибка GigaChat (попытка {attempt+1}/{retries}): {e}")
+            time.sleep(2 ** attempt)
+    return None, None
+
 
 def process_llm_requests(conn):
     if not is_ai_configured():
@@ -315,7 +435,6 @@ def process_llm_requests(conn):
         """)
         conn.commit()
         return
-
     requests_list = get_pending_llm_requests(conn)
     if not requests_list:
         return
@@ -326,14 +445,12 @@ def process_llm_requests(conn):
         address = req['address']
         period_id = req['period_id']
         attempts = req['attempts']
-
         period = get_period_details(conn, period_id)
         if not period:
             if logger:
                 logger.error(f"Период {period_id} не найден, пропускаем")
             continue
         period_ym = f"{period['year']}-{period['month']:02d}"
-
         current, prev_data, prev_ym, last_12_data = get_aggregated_data(conn, address, period_id)
         if not current:
             if logger:
@@ -341,7 +458,6 @@ def process_llm_requests(conn):
             conn.execute("UPDATE llm_requests SET status = 'failed', last_error = 'Нет данных для анализа' WHERE id = ?", (req_id,))
             conn.commit()
             continue
-
         prompt = format_prompt(address, period_ym, current, prev_data, prev_ym, last_12_data)
         if prompt is None:
             if logger:
@@ -349,10 +465,8 @@ def process_llm_requests(conn):
             conn.execute("UPDATE llm_requests SET status = 'failed', last_error = 'Ошибка формирования промта' WHERE id = ?", (req_id,))
             conn.commit()
             continue
-
         conn.execute("UPDATE llm_requests SET status = 'processing', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (req_id,))
         conn.commit()
-
         response_text, tokens = call_ai_api(prompt, retries=3)
         if response_text is not None and response_text.strip() != '':
             model = AI_CONFIG.get('ai', {}).get('model', 'unknown')
@@ -388,18 +502,16 @@ def process_llm_requests(conn):
             conn.commit()
             if logger:
                 logger.error(f"Запрос {req_id} не удался: {error}, попытка {new_attempts}/{MAX_RETRIES}")
-
         time.sleep(SLEEP_BETWEEN_REQUESTS)
+
 
 def generate_telegram_message_for_period(conn, address, period_id):
     period = get_period_details(conn, period_id)
     period_str = f"{period['year']}-{period['month']:02d}"
-
     current, _, _, _ = get_aggregated_data(conn, address, period_id)
     total = sum(item['amount_due'] for item in current) if current else 0
-
     header_lines = []
-    header_lines.append("🏠 Анализ ЕПД")
+    header_lines.append("📊 Анализ ЕПД")
     header_lines.append(f"Адрес: {address}")
     header_lines.append(f"Период: {period_str}")
     header_lines.append("")
@@ -407,9 +519,8 @@ def generate_telegram_message_for_period(conn, address, period_id):
     if current:
         header_lines.append("В т.ч.:")
         for item in sorted(current, key=lambda x: x['amount_due'], reverse=True):
-            header_lines.append(f"🔹 {item['name']}: {item['amount_due']:,.2f} руб. (кол-во: {item['quantity']:.3f})")
+            header_lines.append(f"  • {item['name']}: {item['amount_due']:,.2f} руб. (кол-во: {item['quantity']:.3f})")
     header = "\n".join(header_lines)
-
     cur = conn.execute("""
         SELECT response_text, status, last_error
         FROM llm_requests
@@ -418,8 +529,13 @@ def generate_telegram_message_for_period(conn, address, period_id):
         LIMIT 1
     """, (address, period_id))
     llm_row = cur.fetchone()
-    ai_available = is_ai_configured() and llm_row and llm_row['status'] == 'success' and llm_row['response_text'] and llm_row['response_text'].strip() != ''
-
+    ai_available = (
+        is_ai_configured()
+        and llm_row
+        and llm_row['status'] == 'success'
+        and llm_row['response_text']
+        and llm_row['response_text'].strip() != ''
+    )
     if ai_available:
         analysis_text = llm_row['response_text']
         analysis_text = clean_markdown(analysis_text)
@@ -431,9 +547,7 @@ def generate_telegram_message_for_period(conn, address, period_id):
             analysis = f"AI-анализ не выполнен: {llm_row['last_error']}."
         else:
             analysis = "AI-анализ не выполнен (причина неизвестна)."
-
     full_text = header + "\n\n" + analysis
-
     MAX_TOTAL = 4000
     if len(full_text) > MAX_TOTAL:
         if logger:
@@ -442,10 +556,14 @@ def generate_telegram_message_for_period(conn, address, period_id):
         if cut_point == -1:
             cut_point = MAX_TOTAL
         full_text = full_text[:cut_point] + "\n... (сообщение обрезано)"
-
     return full_text
 
+
 def process_telegram_messages(conn):
+    if not INI_CONFIG.getboolean('notifications', 'telegram_enabled', fallback=True):
+        if logger:
+            logger.info("Отправка в Telegram отключена в конфиге.")
+        return
     messages = get_pending_telegram_messages(conn)
     if not messages:
         return
@@ -459,19 +577,12 @@ def process_telegram_messages(conn):
         period_id = msg['period_id']
         message_text = msg['message_text']
         attempts = msg['attempts']
-
-        if not message_text.startswith('🏠 Анализ ЕПД'):
+        if not message_text.startswith('📊 Анализ ЕПД'):
             message_text = generate_telegram_message_for_period(conn, address, period_id)
-            conn.execute("""
-                UPDATE telegram_messages
-                SET message_text = ?
-                WHERE id = ?
-            """, (message_text, msg_id))
+            conn.execute("UPDATE telegram_messages SET message_text = ? WHERE id = ?", (message_text, msg_id))
             conn.commit()
-
         if logger:
-            logger.info(f"Отправка сообщения {msg_id}, длина {len(message_text)} символов")
-
+            logger.info(f"Отправка сообщения {msg_id} в Telegram, длина {len(message_text)} символов")
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         payload = {
             'chat_id': chat_id,
@@ -482,7 +593,10 @@ def process_telegram_messages(conn):
             response.raise_for_status()
             conn.execute("""
                 UPDATE telegram_messages
-                SET status = 'sent', sent_at = CURRENT_TIMESTAMP, attempts = attempts + 1, last_error = NULL
+                SET status = 'sent',
+                    sent_at = CURRENT_TIMESTAMP,
+                    attempts = attempts + 1,
+                    last_error = NULL
                 WHERE id = ?
             """, (msg_id,))
             conn.commit()
@@ -503,39 +617,123 @@ def process_telegram_messages(conn):
             """, (status, new_attempts, error, msg_id))
             conn.commit()
             if logger:
-                logger.error(f"Ошибка отправки сообщения {msg_id}: {e} (попытка {new_attempts}/{MAX_RETRIES})")
+                logger.error(f"Ошибка отправки сообщения {msg_id} в Telegram: {e} (попытка {new_attempts}/{MAX_RETRIES})")
         time.sleep(SLEEP_BETWEEN_REQUESTS)
 
-def create_telegram_messages_for_successful_llm(conn):
+
+def process_vk_messages(conn):
+    """Отправка сообщений во ВКонтакте."""
+    if not INI_CONFIG.getboolean('notifications', 'vk_enabled', fallback=False):
+        if logger:
+            logger.info("Отправка в VK отключена в конфиге.")
+        return
+    messages = get_pending_vk_messages(conn)
+    if not messages:
+        return
+    if logger:
+        logger.info(f"Найдено {len(messages)} сообщений для отправки в VK")
+    access_token = INI_CONFIG.get('vk', 'access_token')
+    peer_id = INI_CONFIG.get('vk', 'peer_id')
+    if not access_token or not peer_id:
+        if logger:
+            logger.error("Не заданы access_token или peer_id для VK. Отправка невозможна.")
+        return
+    for msg in messages:
+        msg_id = msg['id']
+        address = msg['address']
+        period_id = msg['period_id']
+        message_text = msg['message_text']
+        attempts = msg['attempts']
+        if not message_text.startswith('📊 Анализ ЕПД'):
+            message_text = generate_telegram_message_for_period(conn, address, period_id)
+            conn.execute("UPDATE telegram_messages SET message_text = ? WHERE id = ?", (message_text, msg_id))
+            conn.commit()
+        if logger:
+            logger.info(f"Отправка сообщения {msg_id} в VK, длина {len(message_text)} символов")
+        url = "https://api.vk.com/method/messages.send"
+        params = {
+            'access_token': access_token,
+            'peer_id': peer_id,
+            'message': message_text,
+            'random_id': 0,
+            'v': '5.131'
+        }
+        try:
+            response = requests.post(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if 'error' in data:
+                raise Exception(data['error'].get('error_msg', 'VK API error'))
+            conn.execute("""
+                UPDATE telegram_messages
+                SET status = 'sent',
+                    sent_at = CURRENT_TIMESTAMP,
+                    attempts = attempts + 1,
+                    last_error = NULL
+                WHERE id = ?
+            """, (msg_id,))
+            conn.commit()
+            if logger:
+                logger.info(f"Сообщение {msg_id} отправлено в VK")
+        except Exception as e:
+            new_attempts = attempts + 1
+            if new_attempts >= MAX_RETRIES:
+                status = 'failed'
+                error = f"Лимит попыток, последняя ошибка: {e}"
+            else:
+                status = 'failed'
+                error = str(e)
+            conn.execute("""
+                UPDATE telegram_messages
+                SET status = ?, attempts = ?, last_error = ?, sent_at = NULL
+                WHERE id = ?
+            """, (status, new_attempts, error, msg_id))
+            conn.commit()
+            if logger:
+                logger.error(f"Ошибка отправки сообщения {msg_id} в VK: {e} (попытка {new_attempts}/{MAX_RETRIES})")
+        time.sleep(SLEEP_BETWEEN_REQUESTS)
+
+
+def create_messages_for_successful_llm(conn):
+    """Ставит задачи на отправку во ВСЕ включённые каналы после успешного AI-анализа."""
     cur = conn.execute("""
         SELECT DISTINCT l.address, l.period_id
         FROM llm_requests l
-        LEFT JOIN telegram_messages t ON t.address = l.address AND t.period_id = l.period_id AND t.status = 'sent'
-        WHERE l.status = 'success' AND l.response_text IS NOT NULL AND l.response_text != '' AND t.id IS NULL
+        WHERE l.status = 'success'
+          AND l.response_text IS NOT NULL
+          AND l.response_text != ''
     """)
     rows = cur.fetchall()
     for row in rows:
         address = row['address']
         period_id = row['period_id']
         msg_text = generate_telegram_message_for_period(conn, address, period_id)
-        conn.execute("""
-            INSERT INTO telegram_messages (address, period_id, message_text, status)
-            VALUES (?, ?, ?, 'pending')
-        """, (address, period_id, msg_text))
-        conn.commit()
-        if logger:
-            logger.info(f"Создано сообщение для Telegram для {address} за период {period_id}")
+        enqueue_notifications(
+            conn,
+            address=address,
+            period_id=period_id,
+            message_text=msg_text,
+            ini_config=INI_CONFIG,
+            logger=logger,
+            reset_existing=False,
+        )
+
 
 def main():
     global logger
     setup_logger()
     conn = get_db_connection()
     try:
-        create_telegram_messages_for_successful_llm(conn)
+        # 1. Сначала выполняем анализ (LLM)
         process_llm_requests(conn)
+        # 2. Затем ставим задачи во ВСЕ включённые каналы
+        create_messages_for_successful_llm(conn)
+        # 3. И сразу отправляем всё, что включено и ещё не отправлено
         process_telegram_messages(conn)
+        process_vk_messages(conn)
     finally:
         conn.close()
+
 
 if __name__ == '__main__':
     main()
