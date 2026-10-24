@@ -1,0 +1,61 @@
+name: Auto-fix with Ruff
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Ветка для автопочинки'
+        required: true
+        default: 'main'
+
+jobs:
+  autofix:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Show what will be fixed (dry-run)
+        run: ruff check . --diff || true
+
+      - name: Apply fixes
+        run: ruff check . --fix || true
+
+      - name: Check for changes
+        id: changes
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "Ничего исправлять не нужно."
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "--- Исправленные файлы ---"
+            git diff --stat
+          fi
+
+      - name: Commit and push
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "style: auto-fix with ruff (I001, W292, F401)"
+          git push
+
+      - name: Summary
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          echo "::notice::Ruff исправил файлы и запушил коммит в ${{ inputs.branch }}. Проверьте изменения в истории коммитов."
