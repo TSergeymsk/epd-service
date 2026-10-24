@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 """ Оркестратор для AI-анализа и отправки уведомлений (Telegram + VK). """
-import os
-import sys
-import time
-import json
-import requests
-import yaml
-import re
 import html
-from datetime import datetime
-from pathlib import Path
+import os
+import random
+import re
+import time
 
-sys.path.insert(0, str(Path(__file__).parent))
-from utils import get_db_connection, load_ai_config, load_ini_config
+import requests
+
 from notifications import enqueue_notifications
+from utils import get_db_connection, load_ai_config, load_ini_config
+
 
 # Конфигурация (глобальная, без логгера)
 INI_CONFIG = load_ini_config()
 AI_CONFIG = load_ai_config()
 MAX_RETRIES = 3
 SLEEP_BETWEEN_REQUESTS = 5
+
+# Лимиты мессенджеров (в символах)
+TELEGRAM_MAX_LEN = 4096
+VK_MAX_LEN = 4096
 
 # Логгер будет инициализирован в main()
 logger = None
@@ -348,7 +349,6 @@ def call_gigachat_api(prompt, retries=3):
     temperature = ai_cfg.get('temperature', 0.7)
     max_tokens = ai_cfg.get('max_tokens', 2000)
 
-    # CA-сертификаты: библиотека ожидает путь к ФАЙЛУ, а не к каталогу
     ca_bundle = INI_CONFIG.get('ssl', 'ca_bundle_path', fallback=None)
     ca_bundle_file = None
     if ca_bundle:
@@ -548,13 +548,13 @@ def generate_telegram_message_for_period(conn, address, period_id):
         else:
             analysis = "AI-анализ не выполнен (причина неизвестна)."
     full_text = header + "\n\n" + analysis
-    MAX_TOTAL = 4000
-    if len(full_text) > MAX_TOTAL:
+    max_total = min(TELEGRAM_MAX_LEN, VK_MAX_LEN)
+    if len(full_text) > max_total:
         if logger:
-            logger.warning(f"Общее сообщение для {address} слишком длинное ({len(full_text)}), обрезаем до {MAX_TOTAL}")
-        cut_point = full_text.rfind('\n', 0, MAX_TOTAL)
+            logger.warning(f"Общее сообщение для {address} слишком длинное ({len(full_text)}), обрезаем до {max_total}")
+        cut_point = full_text.rfind('\n', 0, max_total)
         if cut_point == -1:
-            cut_point = MAX_TOTAL
+            cut_point = max_total
         full_text = full_text[:cut_point] + "\n... (сообщение обрезано)"
     return full_text
 
@@ -581,6 +581,12 @@ def process_telegram_messages(conn):
             message_text = generate_telegram_message_for_period(conn, address, period_id)
             conn.execute("UPDATE telegram_messages SET message_text = ? WHERE id = ?", (message_text, msg_id))
             conn.commit()
+        if len(message_text) > TELEGRAM_MAX_LEN:
+            if logger:
+                logger.warning(
+                    f"Сообщение {msg_id} для Telegram длиной {len(message_text)} > {TELEGRAM_MAX_LEN}, обрезаем"
+                )
+            message_text = message_text[:TELEGRAM_MAX_LEN - 20] + "\n... (обрезано)"
         if logger:
             logger.info(f"Отправка сообщения {msg_id} в Telegram, длина {len(message_text)} символов")
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -622,7 +628,12 @@ def process_telegram_messages(conn):
 
 
 def process_vk_messages(conn):
-    """Отправка сообщений во ВКонтакте."""
+    """Отправка сообщений во ВКонтакте.
+
+    ВАЖНО: параметры VK API передаются в ТЕЛЕ запроса (data=), а не в URL
+    (params=). Иначе длинные сообщения с кириллицей после URL-кодирования
+    легко превышают лимит URL и VK/nginx отдают 414 Request-URI Too Large.
+    """
     if not INI_CONFIG.getboolean('notifications', 'vk_enabled', fallback=False):
         if logger:
             logger.info("Отправка в VK отключена в конфиге.")
@@ -638,6 +649,7 @@ def process_vk_messages(conn):
         if logger:
             logger.error("Не заданы access_token или peer_id для VK. Отправка невозможна.")
         return
+    url = "https://api.vk.com/method/messages.send"
     for msg in messages:
         msg_id = msg['id']
         address = msg['address']
@@ -648,22 +660,32 @@ def process_vk_messages(conn):
             message_text = generate_telegram_message_for_period(conn, address, period_id)
             conn.execute("UPDATE telegram_messages SET message_text = ? WHERE id = ?", (message_text, msg_id))
             conn.commit()
+        if len(message_text) > VK_MAX_LEN:
+            if logger:
+                logger.warning(
+                    f"Сообщение {msg_id} для VK длиной {len(message_text)} > {VK_MAX_LEN}, обрезаем"
+                )
+            message_text = message_text[:VK_MAX_LEN - 20] + "\n... (обрезано)"
         if logger:
             logger.info(f"Отправка сообщения {msg_id} в VK, длина {len(message_text)} символов")
-        url = "https://api.vk.com/method/messages.send"
-        params = {
+        random_id = random.randint(1, 2_147_483_647)
+        payload = {
             'access_token': access_token,
             'peer_id': peer_id,
             'message': message_text,
-            'random_id': 0,
-            'v': '5.131'
+            'random_id': random_id,
+            'v': '5.131',
         }
         try:
-            response = requests.post(url, params=params, timeout=10)
+            response = requests.post(url, data=payload, timeout=15)
             response.raise_for_status()
             data = response.json()
             if 'error' in data:
-                raise Exception(data['error'].get('error_msg', 'VK API error'))
+                err = data['error']
+                raise Exception(
+                    f"VK API error {err.get('error_code')}: {err.get('error_msg')}"
+                )
+            vk_message_id = data.get('response')
             conn.execute("""
                 UPDATE telegram_messages
                 SET status = 'sent',
@@ -674,7 +696,7 @@ def process_vk_messages(conn):
             """, (msg_id,))
             conn.commit()
             if logger:
-                logger.info(f"Сообщение {msg_id} отправлено в VK")
+                logger.info(f"Сообщение {msg_id} отправлено в VK (vk_message_id={vk_message_id})")
         except Exception as e:
             new_attempts = attempts + 1
             if new_attempts >= MAX_RETRIES:
@@ -695,13 +717,7 @@ def process_vk_messages(conn):
 
 
 def create_messages_for_successful_llm(conn):
-    """Ставит задачи на отправку во ВСЕ включённые каналы после успешного AI-анализа.
-
-    Обрабатывает только те успешные llm_requests, для которых уведомления
-    ещё не были поставлены в очередь (notifications_enqueued = 0).
-    После постановки помечает запись как обработанную, чтобы при следующем
-    запуске она не попала в выборку повторно.
-    """
+    """Ставит задачи на отправку во ВСЕ включённые каналы после успешного AI-анализа."""
     cur = conn.execute("""
         SELECT DISTINCT l.address, l.period_id
         FROM llm_requests l
@@ -726,8 +742,6 @@ def create_messages_for_successful_llm(conn):
             logger=logger,
             reset_existing=False,
         )
-        # Помечаем запись как обработанную — независимо от того, сколько
-        # каналов реально создалось (могло быть 0, если все выключены).
         conn.execute("""
             UPDATE llm_requests
             SET notifications_enqueued = 1
@@ -741,11 +755,8 @@ def main():
     setup_logger()
     conn = get_db_connection()
     try:
-        # 1. Сначала выполняем анализ (LLM)
         process_llm_requests(conn)
-        # 2. Затем ставим задачи во ВСЕ включённые каналы
         create_messages_for_successful_llm(conn)
-        # 3. И сразу отправляем всё, что включено и ещё не отправлено
         process_telegram_messages(conn)
         process_vk_messages(conn)
     finally:

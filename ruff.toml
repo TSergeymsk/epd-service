@@ -17,8 +17,7 @@ extend-exclude = [
 [lint]
 select = ["E", "F", "W", "I"]
 ignore = [
-    "E501",   # длину строки отдаём форматтеру
-    # W503 и W504 в Ruff не существуют — не указываем их вовсе
+    "E501",
 ]
 
 [lint.per-file-ignores]

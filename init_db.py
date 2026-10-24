@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """ Инициализация и миграция базы данных.
 Создаёт недостающие таблицы и индексы, безопасно добавляет новые колонки. """
-import sqlite3
-import os
-import sys
-import shutil
 import configparser
+import os
+import shutil
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 3  # 1 - оригинальная, 2 - channel/provider + новые таблицы, 3 - notifications_enqueued
+SCHEMA_VERSION = 3
 
 
 def get_config_path():
@@ -26,8 +25,6 @@ def get_db_path():
         return config.get('paths', 'db_path')
     return ':memory:'
 
-
-# -------- Базовые хелперы --------
 
 def table_exists(cursor, name):
     cursor.execute(
@@ -52,7 +49,6 @@ def set_user_version(cursor, version):
 
 
 def backup_db(db_path):
-    """Резервная копия через VACUUM INTO (SQLite >= 3.27), fallback — copy2."""
     backup_path = f"{db_path}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     try:
         conn = sqlite3.connect(db_path)
@@ -65,8 +61,6 @@ def backup_db(db_path):
         print(f"[migrate] Резервная копия (copy): {backup_path}")
         return backup_path
 
-
-# -------- Схема (CREATE IF NOT EXISTS) --------
 
 BASE_TABLES = """
 CREATE TABLE IF NOT EXISTS accounts (
@@ -206,17 +200,13 @@ CREATE INDEX IF NOT EXISTS idx_imported_emails_status ON imported_emails(status)
 """
 
 
-# -------- Миграция --------
-
 def migrate_schema(cursor):
-    """Идемпотентно приводит схему к SCHEMA_VERSION."""
     current = get_user_version(cursor)
     print(f"[migrate] Текущая версия схемы: {current}, целевая: {SCHEMA_VERSION}")
     if current >= SCHEMA_VERSION:
         print("[migrate] Схема уже актуальна.")
         return
 
-    # --- v1 -> v2 ---
     if current < 2:
         if table_exists(cursor, 'telegram_messages'):
             if not column_exists(cursor, 'telegram_messages', 'channel'):
@@ -231,7 +221,6 @@ def migrate_schema(cursor):
                 print("[migrate] + llm_requests.provider")
         set_user_version(cursor, 2)
 
-    # --- v2 -> v3 ---
     if current < 3:
         if table_exists(cursor, 'llm_requests'):
             if not column_exists(cursor, 'llm_requests', 'notifications_enqueued'):
@@ -239,8 +228,6 @@ def migrate_schema(cursor):
                     "ALTER TABLE llm_requests "
                     "ADD COLUMN notifications_enqueued INTEGER DEFAULT 0"
                 )
-                # Все существующие записи считаем «уже обработанными»,
-                # чтобы не рассылать уведомления по всей исторической базе.
                 cursor.execute(
                     "UPDATE llm_requests SET notifications_enqueued = 1"
                 )

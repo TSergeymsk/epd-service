@@ -25,7 +25,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install core deps (обязательные)
+      - name: Install core deps
         run: |
           python -m pip install --upgrade pip
           pip install flask requests pyyaml beautifulsoup4 markdown
@@ -39,23 +39,44 @@ jobs:
           pip install gigachat || echo "::warning::gigachat install failed; tests use mocks"
         continue-on-error: true
 
-      - name: Verify imports (ранняя диагностика)
+      - name: Diagnostics
         run: |
-          python -c "import flask, requests, yaml; print('core deps OK')"
+          python --version
+          pip show flask requests pyyaml pytest pytest-cov pytest-mock | grep -E "^(Name|Version):"
+          echo "--- pytest.ini ---"
+          cat pytest.ini || echo "no pytest.ini"
+          echo "--- pyproject.toml (если есть) ---"
+          cat pyproject.toml 2>/dev/null || echo "no pyproject.toml"
+          echo "--- tests/ ---"
+          ls -la tests/
 
-      - name: Pytest collect-only (проверка сбора)
-        run: |
-          pytest --collect-only -q
+      - name: Verify imports
+        run: python -c "import flask, requests, yaml; print('core deps OK')"
+
+      - name: Pytest collect-only
+        id: collect
+        run: pytest --collect-only -v 2>&1 | tee collect.log
+        continue-on-error: true
 
       - name: Run tests
-        run: |
-          pytest --cov=. --cov-report=term-missing --cov-report=xml -v
+        id: pytest
+        run: pytest --cov=. --cov-report=term-missing --cov-report=xml -v 2>&1 | tee pytest.log
+        continue-on-error: true
 
-      - name: Upload coverage report
+      - name: Upload logs
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: coverage-py${{ matrix.python-version }}
-          path: coverage.xml
+          name: logs-py${{ matrix.python-version }}
+          path: |
+            collect.log
+            pytest.log
+            coverage.xml
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 14
+
+      - name: Fail if tests failed
+        if: steps.pytest.outcome == 'failure' || steps.collect.outcome == 'failure'
+        run: |
+          echo "::error::Tests failed. Скачайте артефакт logs-py${{ matrix.python-version }} и пришлите collect.log/pytest.log."
+          exit 1
