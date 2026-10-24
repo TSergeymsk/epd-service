@@ -11,7 +11,6 @@ import requests
 from notifications import enqueue_notifications
 from utils import get_db_connection, load_ai_config, load_ini_config
 
-
 # Конфигурация (глобальная, без логгера)
 INI_CONFIG = load_ini_config()
 AI_CONFIG = load_ai_config()

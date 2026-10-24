@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """ Общие утилиты: загрузка конфигурации, логирование, работа с БД. """
-import os
-import sys
-import logging
 import configparser
-import yaml
+import logging
+import os
 from pathlib import Path
+
+import yaml
+
 
 def get_project_root():
     return Path(__file__).parent.absolute()

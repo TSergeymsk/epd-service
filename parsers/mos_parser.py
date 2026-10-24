@@ -11,22 +11,24 @@
     created_at, updated_at
 Ключ задачи — (address, period_id), НЕ account_id.
 """
-import os
-import sys
-import re
 import email
 import logging
+import os
+import re
+import sys
 from email.policy import default
-from bs4 import BeautifulSoup
 from pathlib import Path
+
+from bs4 import BeautifulSoup
 
 # Добавляем путь к корню проекта
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from utils import get_db_connection, setup_logging
 from parsers.base_parser import (
-    get_or_create_account, get_or_create_period, save_charges,
-    normalize_service_name
+    get_or_create_account,
+    get_or_create_period,
+    save_charges,
 )
+from utils import get_db_connection, setup_logging
 
 logger = logging.getLogger(__name__)
 
