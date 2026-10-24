@@ -695,15 +695,24 @@ def process_vk_messages(conn):
 
 
 def create_messages_for_successful_llm(conn):
-    """Ставит задачи на отправку во ВСЕ включённые каналы после успешного AI-анализа."""
+    """Ставит задачи на отправку во ВСЕ включённые каналы после успешного AI-анализа.
+
+    Обрабатывает только те успешные llm_requests, для которых уведомления
+    ещё не были поставлены в очередь (notifications_enqueued = 0).
+    После постановки помечает запись как обработанную, чтобы при следующем
+    запуске она не попала в выборку повторно.
+    """
     cur = conn.execute("""
         SELECT DISTINCT l.address, l.period_id
         FROM llm_requests l
         WHERE l.status = 'success'
           AND l.response_text IS NOT NULL
           AND l.response_text != ''
+          AND l.notifications_enqueued = 0
     """)
     rows = cur.fetchall()
+    if not rows:
+        return
     for row in rows:
         address = row['address']
         period_id = row['period_id']
@@ -717,6 +726,14 @@ def create_messages_for_successful_llm(conn):
             logger=logger,
             reset_existing=False,
         )
+        # Помечаем запись как обработанную — независимо от того, сколько
+        # каналов реально создалось (могло быть 0, если все выключены).
+        conn.execute("""
+            UPDATE llm_requests
+            SET notifications_enqueued = 1
+            WHERE address = ? AND period_id = ? AND status = 'success'
+        """, (address, period_id))
+        conn.commit()
 
 
 def main():
