@@ -2,15 +2,16 @@
 """
 Веб-интерфейс для просмотра данных ЕПД и управления AI-анализом.
 """
-import sqlite3
 import configparser
 import logging
 import os
-import json
+import sqlite3
 from pathlib import Path
-from flask import Flask, render_template, request, jsonify, send_from_directory
+
+from flask import Flask, jsonify, render_template, request, send_from_directory
 
 from notifications import enqueue_notifications
+
 
 # Загрузка конфигурации
 def get_config_path():
@@ -19,21 +20,20 @@ def get_config_path():
         return env_path
     return str(Path(__file__).parent / 'config.ini')
 
+
 def load_config():
     config = configparser.ConfigParser()
     config.read(get_config_path())
     return config
 
+
 def setup_logging():
     config = load_config()
     log_dir = '/tmp/logs'
-    try:
-        if config.has_section('logging') and config.has_option('logging', 'log_dir'):
-            log_dir = config.get('logging', 'log_dir')
-        else:
-            log_dir = os.path.join(os.path.dirname(__file__), 'logs')
-    except Exception:
-        pass
+    if config.has_section('logging') and config.has_option('logging', 'log_dir'):
+        log_dir = config.get('logging', 'log_dir')
+    else:
+        log_dir = os.path.join(os.path.dirname(__file__), 'logs')
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, 'frontend.log')
     logging.basicConfig(
@@ -46,34 +46,43 @@ def setup_logging():
     )
     return logging.getLogger(__name__)
 
+
 _logger = None
+
+
 def get_logger():
     global _logger
     if _logger is None:
         _logger = setup_logging()
     return _logger
 
+
 config = load_config()
+
 
 def get_db_path():
     if config.has_section('paths') and config.has_option('paths', 'db_path'):
         return config.get('paths', 'db_path')
     return ':memory:'
 
+
 def get_port():
     if config.has_section('frontend') and config.has_option('frontend', 'port'):
         return config.getint('frontend', 'port')
     return 5000
+
 
 def get_static_dir():
     if config.has_section('frontend') and config.has_option('frontend', 'static_dir'):
         return config.get('frontend', 'static_dir')
     return 'static'
 
+
 def get_debug():
     if config.has_section('frontend') and config.has_option('frontend', 'debug'):
         return config.getboolean('frontend', 'debug')
     return False
+
 
 DB_PATH = get_db_path()
 PORT = get_port()
@@ -82,16 +91,19 @@ DEBUG = get_debug()
 
 app = Flask(__name__, static_folder=STATIC_DIR)
 
+
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
 
 # ------------------ Вспомогательные функции ------------------
 def get_period_id(conn, year, month):
     cur = conn.execute("SELECT id FROM periods WHERE year = ? AND month = ?", (year, month))
     row = cur.fetchone()
     return row['id'] if row else None
+
 
 def get_aggregated_data(conn, address, period_id):
     cur = conn.execute("SELECT id FROM accounts WHERE address = ?", (address,))
@@ -196,6 +208,7 @@ def get_aggregated_data(conn, address, period_id):
 
     return current, prev_data, prev_ym, last_12_data
 
+
 # ------------------ API для очереди задач ------------------
 @app.route('/api/queue_status')
 def queue_status():
@@ -222,6 +235,7 @@ def queue_status():
         'notifications_pending': tg_pending + vk_pending,
     })
 
+
 # ------------------ API для управления правилами фильтрации ------------------
 @app.route('/api/filter_rules')
 def filter_rules():
@@ -230,6 +244,7 @@ def filter_rules():
     rules = [dict(row) for row in cur.fetchall()]
     conn.close()
     return jsonify(rules)
+
 
 @app.route('/api/filter_rules', methods=['POST'])
 def add_filter_rule():
@@ -255,6 +270,7 @@ def add_filter_rule():
     new_id = cur.lastrowid
     conn.close()
     return jsonify({'id': new_id, 'status': 'ok'}), 201
+
 
 @app.route('/api/filter_rules/<int:rule_id>', methods=['PUT'])
 def update_filter_rule(rule_id):
@@ -282,6 +298,7 @@ def update_filter_rule(rule_id):
     conn.close()
     return jsonify({'status': 'ok'})
 
+
 @app.route('/api/filter_rules/<int:rule_id>', methods=['DELETE'])
 def delete_filter_rule(rule_id):
     conn = get_db()
@@ -294,10 +311,12 @@ def delete_filter_rule(rule_id):
     conn.close()
     return jsonify({'status': 'ok'})
 
+
 # ------------------ Маршруты (существующие) ------------------
 @app.route('/')
 def index():
     return render_template('index.html')
+
 
 @app.route('/api/addresses')
 def addresses():
@@ -306,6 +325,7 @@ def addresses():
     addresses = [row['address'] for row in cur.fetchall()]
     conn.close()
     return jsonify(addresses)
+
 
 @app.route('/api/accounts_by_address')
 def accounts_by_address():
@@ -321,6 +341,7 @@ def accounts_by_address():
     conn.close()
     return jsonify(accounts)
 
+
 @app.route('/api/services')
 def services():
     conn = get_db()
@@ -328,6 +349,7 @@ def services():
     services = [dict(row) for row in cur.fetchall()]
     conn.close()
     return jsonify(services)
+
 
 @app.route('/api/periods')
 def periods():
@@ -348,6 +370,7 @@ def periods():
     periods = [{"year": row["year"], "month": row["month"]} for row in cur.fetchall()]
     conn.close()
     return jsonify(periods)
+
 
 @app.route('/api/data')
 def data():
@@ -446,6 +469,7 @@ def data():
         "service_names": service_names
     })
 
+
 @app.route('/api/analysis_for_month')
 def analysis_for_month():
     address = request.args.get('address')
@@ -474,6 +498,7 @@ def analysis_for_month():
         })
     else:
         return jsonify({"error": "No analysis found"}), 404
+
 
 @app.route('/api/llm_details')
 def llm_details():
@@ -519,6 +544,7 @@ def llm_details():
     else:
         return jsonify({"error": "No LLM request found"}), 404
 
+
 @app.route('/api/retry_ai', methods=['POST'])
 def retry_ai():
     data = request.get_json()
@@ -555,6 +581,7 @@ def retry_ai():
     conn.close()
     return jsonify({"status": "ok"})
 
+
 @app.route('/api/retry_telegram', methods=['POST'])
 def retry_telegram():
     """Ручная повторная отправка уведомления.
@@ -584,9 +611,6 @@ def retry_telegram():
         conn.close()
         return jsonify({"error": "No successful LLM response for this period"}), 400
 
-    # Ставим задачи на ВСЕ включённые каналы, сбрасывая существующие записи.
-    # message_text=None → в БД запишется пустая строка, и оркестратор
-    # сформирует текст в едином plain-формате перед отправкой.
     result = enqueue_notifications(
         conn,
         address=address,
@@ -599,11 +623,13 @@ def retry_telegram():
     conn.close()
     return jsonify({"status": "ok", "channels": result})
 
+
 # ------------------ favicon ------------------
 @app.route('/favicon.ico')
 def favicon():
     return send_from_directory(os.path.join(app.root_path, 'static'),
                                'favicon.ico', mimetype='image/vnd.microsoft.icon')
+
 
 # ------------------ Запуск ------------------
 if __name__ == '__main__':

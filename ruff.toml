@@ -1,0 +1,35 @@
+# ruff.toml
+target-version = "py311"
+line-length = 110
+
+extend-exclude = [
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "logs",
+    "build",
+    "dist",
+    ".pytest_cache",
+    "migrations",
+]
+
+[lint]
+# Базовый набор: pycodestyle (E/W), pyflakes (F), isort (I).
+# Узкий select позволяет не переделывать весь проект под BLE/S/EXE.
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E501",   # длину строки отдаём форматтеру
+    "W503",   # устаревшее: line break before binary operator
+    "W504",   # line break after binary operator
+]
+
+[lint.per-file-ignores]
+# Легаси-скрипт, который не относится к доработкам; не трогаем.
+"getmail_filter.py" = ["E", "F", "W", "I"]
+
+# Shebang в веб-приложении не нужен, но если хотите оставить — игнорируем EXE001.
+"frontend.py" = ["EXE001"]
+
+# Тесты: ассерты и MagicMock — норма.
+"tests/*" = ["E", "F", "W", "I", "S101"]
