@@ -25,38 +25,27 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y sqlite3
-
-      - name: Install core Python deps
-        # Ставим по отдельности, чтобы отсутствие optional-зависимости
-        # (gigachat) не блокировало установку обязательных (flask/requests/pyyaml).
+      - name: Install core deps (обязательные)
         run: |
           python -m pip install --upgrade pip
           pip install flask requests pyyaml beautifulsoup4 markdown
-
-      - name: Install optional gigachat (не критично для тестов)
-        # Тесты мокают gigachat через sys.modules, поэтому падение
-        # установки не должно ломать прогон.
-        run: |
-          pip install gigachat || echo "::warning::gigachat install failed; tests will use mocks"
-        continue-on-error: true
 
       - name: Install dev deps
         run: |
           pip install pytest pytest-cov pytest-mock
 
-      - name: Show environment
+      - name: Install optional gigachat (не критично)
         run: |
-          python --version
-          pip list
+          pip install gigachat || echo "::warning::gigachat install failed; tests use mocks"
+        continue-on-error: true
 
-      - name: Verify imports
-        # Раньше всего выявляет «нет зависимостей» — падает с понятным сообщением
+      - name: Verify imports (ранняя диагностика)
         run: |
           python -c "import flask, requests, yaml; print('core deps OK')"
+
+      - name: Pytest collect-only (проверка сбора)
+        run: |
+          pytest --collect-only -q
 
       - name: Run tests
         run: |
