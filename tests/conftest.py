@@ -1,47 +1,204 @@
-"""Фикстуры и общие настройки для тестов."""
+"""Общие фикстуры для тестов epd-service."""
+import configparser
+import os
+import sqlite3
 import sys
 from pathlib import Path
+
 import pytest
-import sqlite3
-import tempfile
-import os
 
-# Добавляем корень проекта в PYTHONPATH
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Добавляем корень проекта в sys.path, чтобы `import orchestrator` работал
+# независимо от того, откуда запущен pytest.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
+# -------- Схема БД для тестов (минимально достаточная) --------
+
+SCHEMA_SQL = """
+CREATE TABLE accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_number TEXT NOT NULL UNIQUE,
+    address TEXT NOT NULL
+);
+CREATE TABLE periods (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    year INTEGER NOT NULL,
+    month INTEGER NOT NULL,
+    start_date TEXT NOT NULL,
+    UNIQUE(year, month)
+);
+CREATE TABLE services (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    unit TEXT,
+    code TEXT
+);
+CREATE TABLE charges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    period_id INTEGER NOT NULL,
+    service_id INTEGER NOT NULL,
+    quantity REAL,
+    tariff REAL,
+    accrued_by_tariff REAL,
+    benefit REAL DEFAULT 0,
+    recalculation REAL DEFAULT 0,
+    amount_due REAL,
+    UNIQUE(account_id, period_id, service_id)
+);
+CREATE TABLE llm_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    address TEXT NOT NULL,
+    period_id INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    provider TEXT,
+    temperature REAL DEFAULT 0.7,
+    max_tokens INTEGER DEFAULT 2000,
+    prompt_template TEXT,
+    request_payload TEXT,
+    response_text TEXT,
+    tokens_used INTEGER,
+    status TEXT DEFAULT 'pending',
+    attempts INTEGER DEFAULT 0,
+    last_error TEXT,
+    notifications_enqueued INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE telegram_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    address TEXT NOT NULL,
+    period_id INTEGER NOT NULL,
+    message_text TEXT NOT NULL,
+    parse_mode TEXT DEFAULT 'HTML',
+    sent_at TIMESTAMP,
+    status TEXT DEFAULT 'pending',
+    attempts INTEGER DEFAULT 0,
+    last_error TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    channel TEXT DEFAULT 'telegram'
+);
+"""
+
 
 @pytest.fixture
-def temp_db():
-    """Создаёт временную БД и возвращает соединение и путь."""
-    fd, path = tempfile.mkstemp(suffix='.db')
-    os.close(fd)
-    conn = sqlite3.connect(path)
+def db():
+    """In-memory SQLite с минимальной схемой."""
+    conn = sqlite3.connect(':memory:')
     conn.row_factory = sqlite3.Row
-    # Минимальная схема для тестов
-    conn.executescript('''
-        CREATE TABLE accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, account_number TEXT UNIQUE, address TEXT);
-        CREATE TABLE periods (id INTEGER PRIMARY KEY AUTOINCREMENT, year INTEGER, month INTEGER, start_date TEXT);
-        CREATE TABLE services (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, unit TEXT);
-        CREATE TABLE charges (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER, period_id INTEGER, service_id INTEGER, quantity REAL, tariff REAL, accrued_by_tariff REAL, benefit REAL, recalculation REAL, amount_due REAL);
-        CREATE TABLE account_period_info (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER, period_id INTEGER, total_area REAL, living_area REAL, rooms INTEGER, residents INTEGER, last_payment_date TEXT, meter_readings TEXT);
-        CREATE TABLE raw_imports (id INTEGER PRIMARY KEY AUTOINCREMENT, source_type TEXT, source_identifier TEXT, raw_content TEXT, processed_at TIMESTAMP, account_id INTEGER);
-        CREATE TABLE llm_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT, period_id INTEGER, model TEXT, provider TEXT, temperature REAL, max_tokens INTEGER, prompt_template TEXT, request_payload TEXT, response_text TEXT, tokens_used INTEGER, status TEXT, attempts INTEGER, last_error TEXT, created_at TIMESTAMP, updated_at TIMESTAMP);
-        CREATE TABLE telegram_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT, period_id INTEGER, message_text TEXT, parse_mode TEXT, sent_at TIMESTAMP, status TEXT, attempts INTEGER, last_error TEXT, created_at TIMESTAMP);
-        CREATE TABLE filter_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, from_pattern TEXT, to_pattern TEXT, subject_pattern TEXT, parser_script TEXT, enabled BOOLEAN, priority INTEGER, created_at TIMESTAMP);
-        CREATE TABLE imported_emails (mail_id TEXT PRIMARY KEY, rule_id INTEGER, imported_at TIMESTAMP, status TEXT, parsed_at TIMESTAMP, error_text TEXT);
-        CREATE TABLE address_analysis (id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT, period_id INTEGER, prompt TEXT, response TEXT, model TEXT, tokens_used INTEGER, created_at TIMESTAMP);
-    ''')
-    conn.commit()
-    yield conn, path
+    conn.executescript(SCHEMA_SQL)
+    yield conn
     conn.close()
-    os.unlink(path)
+
 
 @pytest.fixture
-def mock_config():
-    """Возвращает словарь с тестовым конфигом."""
-    return {
-        'paths': {'db_path': ':memory:', 'email_temp_dir': '/tmp'},
-        'openrouter': {'api_key': 'test_key', 'model': 'test-model', 'url': 'https://test.com/v1', 'timeout': '10'},
-        'telegram': {'bot_token': 'test_token', 'chat_id': '12345'},
-        'logging': {'log_dir': '/tmp/logs'},
-        'getmail_filter': {'from_pattern': 'test@example.com', 'to_pattern': 'me@example.com', 'subject_pattern': 'Test'}
-    }
+def db_file(tmp_path):
+    """Файловая БД (нужна для тестов миграций init_db.py)."""
+    path = tmp_path / "test.db"
+    return str(path)
+
+
+@pytest.fixture
+def ini_config():
+    """ConfigParser со всеми секциями, нужными новой логике.
+
+    По умолчанию оба канала включены — так проще тестировать.
+    В конкретных тестах флаги переопределяются через config.set().
+    """
+    cfg = configparser.ConfigParser()
+    cfg.add_section('notifications')
+    cfg.set('notifications', 'telegram_enabled', 'true')
+    cfg.set('notifications', 'vk_enabled', 'true')
+
+    cfg.add_section('telegram')
+    cfg.set('telegram', 'bot_token', 'test_bot_token')
+    cfg.set('telegram', 'chat_id', 'test_chat_id')
+
+    cfg.add_section('vk')
+    cfg.set('vk', 'access_token', 'test_vk_token')
+    cfg.set('vk', 'peer_id', '123456')
+
+    cfg.add_section('gigachat')
+    cfg.set('gigachat', 'credentials', 'test_credentials')
+    cfg.set('gigachat', 'scope', 'GIGACHAT_API_PERS')
+    cfg.set('gigachat', 'base_url', 'https://api.giga.chat/v1')
+
+    cfg.add_section('ssl')
+    cfg.set('ssl', 'ca_bundle_path', '')
+
+    cfg.add_section('paths')
+    cfg.set('paths', 'db_path', ':memory:')
+
+    return cfg
+
+
+@pytest.fixture
+def mock_logger(mocker):
+    """Замоканный logger с методами info/warning/error/exception."""
+    logger = mocker.MagicMock()
+    return logger
+
+
+@pytest.fixture
+def no_sleep(mocker):
+    """Отключает time.sleep в orchestrator, чтобы тесты не тормозили."""
+    import orchestrator
+    mocker.patch.object(orchestrator.time, 'sleep', return_value=None)
+    return True
+
+
+@pytest.fixture
+def fake_gigachat_module(mocker):
+    """Подменяет модули gigachat и gigachat.models, чтобы не требовать установки.
+
+    Возвращает (fake_module, fake_models_module, fake_client_class).
+    fake_client_class поддерживает контекстный менеджер и метод chat().
+    """
+    # --- gigachat.models ---
+    fake_models = mocker.MagicMock()
+
+    class FakeMessages:
+        def __init__(self, role, content):
+            self.role = role
+            self.content = content
+
+    class FakeChat:
+        def __init__(self, messages, temperature, max_tokens):
+            self.messages = messages
+            self.temperature = temperature
+            self.max_tokens = max_tokens
+
+    class FakeMessagesRole:
+        USER = "user"
+        SYSTEM = "system"
+        ASSISTANT = "assistant"
+
+    fake_models.Messages = FakeMessages
+    fake_models.Chat = FakeChat
+    fake_models.MessagesRole = FakeMessagesRole
+
+    # --- gigachat (корневой модуль) ---
+    fake_gigachat = mocker.MagicMock()
+    fake_gigachat.models = fake_models
+
+    class FakeGigaChat:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.chat = mocker.MagicMock()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    fake_gigachat.GigaChat = FakeGigaChat
+
+    mocker.patch.dict(sys.modules, {
+        'gigachat': fake_gigachat,
+        'gigachat.models': fake_models,
+    })
+
+    return fake_gigachat, fake_models, FakeGigaChat
